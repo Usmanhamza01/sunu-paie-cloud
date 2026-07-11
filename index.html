@@ -400,7 +400,7 @@ const SEED_DATA = JSON.parse(`{"entreprise": {"raisonSociale": "PHARMACIE SICAP-
 const SUPABASE_URL = 'https://eoilitbbinrcvkpmjygl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvaWxpdGJiaW5yY3ZrcG1qeWdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM3MDUxNDksImV4cCI6MjA5OTI4MTE0OX0.qapfd_IyN_qsubmEmvCqsTl1cxUIWr0WmtIgZlUFhIM';
 
-const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, salaries:[], saisies:{}, arrondisInit:{}, activityLog:[], tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'' };
+const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, salaries:[], saisies:{}, arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'' };
 
 /* ---- Chargement du client Supabase ---- */
 let _supabaseLibPromise = null;
@@ -489,18 +489,25 @@ async function signUp(email, password, nom, prenom, companyName, licenseKey){
     render(); return;
   }
   state.session = data.session;
-  await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
+  const result = await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
+  if(!result.success){ state.authError = result.message; render(); return; }
   await loadProfileAndCompanies();
   render();
 }
 async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
-  const { data: isFirst } = await sb.rpc('is_first_activation', { p_license_key: licenseKey });
-  const { error } = await sb.from('profiles').insert({
-    id: state.session.user.id, email: state.session.user.email, nom, prenom,
-    license_key: licenseKey, company_name: companyName, edition: check.edition,
-    expires_at: check.expiresAt, is_admin: !!isFirst
-  });
-  if(error){ state.authError = 'Erreur lors de la création du profil : '+error.message; }
+  try{
+    const { data: isFirst, error: rpcError } = await sb.rpc('is_first_activation', { p_license_key: licenseKey });
+    if(rpcError) return { success:false, message: 'Erreur de vérification de la licence : '+rpcError.message+' (avez-vous bien exécuté le script SQL le plus récent dans Supabase ?)' };
+    const { error } = await sb.from('profiles').insert({
+      id: state.session.user.id, email: state.session.user.email, nom, prenom,
+      license_key: licenseKey, company_name: companyName, edition: check.edition,
+      expires_at: check.expiresAt, is_admin: !!isFirst
+    });
+    if(error) return { success:false, message: 'Erreur lors de la création du profil : '+error.message };
+    return { success:true };
+  }catch(e){
+    return { success:false, message: 'Erreur inattendue : '+(e?.message||e) };
+  }
 }
 async function signIn(email, password){
   state.authError = '';
@@ -551,11 +558,13 @@ function openCompanyWithData(id, blob){
   state.saisies = blob?.saisies || {};
   state.arrondisInit = blob?.arrondisInit || {};
   state.activityLog = blob?.activityLog || [];
+  state.compiledBulletinTemplate = null;
   state.tab = 'dashboard';
   state.moisIdx = 0;
   state.salarieFilter = '';
   state.salarieSel = state.salaries.length ? state.salaries[0].id : null;
   render();
+  if(state.entreprise.bulletinTemplate) recompileBulletinTemplate().then(render);
 }
 function closeCompany(){
   state.companyId = null;
@@ -645,6 +654,7 @@ function render(){
     can('params') ? navBtn('params','06','Paramètres') : null,
     el('div',{style:'flex:1'}),
     el('div',{style:'padding:10px 12px 2px 12px;font-size:11px;color:rgba(255,255,255,.55)'}, 'Connecté : '+(state.profile.email||'')+(state.profile.is_admin?' (admin)':'')),
+    installButton(),
     el('button',{class:'nav-btn', onClick:closeCompany}, el('span',{class:'nav-num'},'↩'), 'Changer d\'entreprise'),
     el('button',{class:'nav-btn', onClick:signOutUser}, el('span',{class:'nav-num'},'⏻'), 'Se déconnecter')
   );
@@ -670,6 +680,9 @@ function authShell(children){
     el('div',{class:'subtitle'}, 'Gestion de la paie, simplement.')
   ));
   children.forEach(c=>box.appendChild(c));
+  if(canOfferInstall()){
+    box.appendChild(el('button',{class:'btn secondary', style:'width:100%;margin-top:14px', onClick:openInstallModal}, '⇩ Installer l\'application'));
+  }
   wrap.appendChild(box);
   return wrap;
 }
@@ -723,9 +736,11 @@ function renderActivateLicense(root){
   card.appendChild(el('div',{class:'field'}, label('Clé de licence'), f('SUNU-XXXX-XXXX-XXXX-XXXX',v=>licenseKey=v)));
   if(state.authError) card.appendChild(el('div',{style:'color:var(--red);font-size:12.5px;margin-top:10px'}, state.authError));
   card.appendChild(el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn gold', style:'width:100%', onClick: async ()=>{
+    if(!companyName.trim()||!licenseKey.trim()||!nom.trim()||!prenom.trim()){ state.authError='Tous les champs sont obligatoires.'; render(); return; }
     const check = await verifyLicenseKey(companyName, licenseKey.trim());
     if(!check.valid){ state.authError = check.message; render(); return; }
-    await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
+    const result = await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
+    if(!result.success){ state.authError = result.message; render(); return; }
     await loadProfileAndCompanies();
     render();
   }}, 'Activer')));
@@ -1074,6 +1089,99 @@ function label(t){ return el('label',{},t); }
 /* ---- Salariés ---- */
 const XLSX_COLUMNS = ['N° Ordre','Nom','Prénom','Date de naissance','Lieu de naissance','Date d\'entrée','Date de sortie','Catégorie','Situation familiale','Qualification','Sexe (F/M)','Nationalité (S/E)','Nombre d\'enfants à charge','IPRES RC (OUI/NON)','Congés acquis (F CFA)'];
 let _xlsxLibPromise = null;
+/* ====================================================================
+   MODÈLES DE BULLETINS PERSONNALISÉS
+   Le modèle standard (ci-dessous, fonction renderBulletinOnly) reste le
+   rendu par défaut, inchangé. Si une entreprise définit son propre modèle
+   HTML (avec des variables {{...}}), il est compilé via Handlebars et
+   utilisé à la place, pour l'affichage comme pour l'impression.
+   ==================================================================== */
+let _handlebarsLibPromise = null;
+function ensureHandlebars(){
+  if(window.Handlebars) return Promise.resolve();
+  if(_handlebarsLibPromise) return _handlebarsLibPromise;
+  _handlebarsLibPromise = new Promise((resolve,reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.7.8/handlebars.min.js';
+    s.onload = ()=>resolve();
+    s.onerror = ()=>reject(new Error('Impossible de charger le moteur de modèles. Vérifiez votre connexion internet.'));
+    document.head.appendChild(s);
+  });
+  return _handlebarsLibPromise;
+}
+async function recompileBulletinTemplate(){
+  if(!state.entreprise.bulletinTemplate){ state.compiledBulletinTemplate = null; return; }
+  try{
+    await ensureHandlebars();
+    state.compiledBulletinTemplate = Handlebars.compile(state.entreprise.bulletinTemplate);
+  }catch(e){
+    console.error('Erreur de compilation du modèle de bulletin', e);
+    state.compiledBulletinTemplate = null;
+  }
+}
+function buildBulletinContext(salarie, saisieRaw, arrondiPrec, moisIdx){
+  const b = calcBulletin(salarie, saisieRaw, arrondiPrec, state.params, moisIdx, state.entreprise.annee);
+  const ent = state.entreprise;
+  const p = state.params;
+  const baseRG = Math.min(b.brut, p.ipresRG.plafond);
+  const baseRC = (salarie.ipresRC==='OUI') ? Math.min(b.brut, p.ipresRC.plafond) : 0;
+  const baseCSS = Math.min(b.brut, p.css.plafond);
+  const rubriques = [
+    {code:'001', libelle:'Salaire de base', gains:b.gains.salaireBase},
+    {code:'002', libelle:'Sursalaire', gains:b.gains.sursalaire},
+    {code:'003', libelle:'Heures supplémentaires', gains:b.gains.heuresSup},
+    {code:'004', libelle:'Autre gain', gains:b.gains.autreGain},
+    {code:'007', libelle:"Prime d'ancienneté", base:b.gains.salaireBase, taux:b.tauxAncienneteApplique*100, gains:b.gains.primeAnciennete},
+    {code:'008', libelle:'Autres indemnités', gains:b.gains.autresIndemnites},
+    {code:'009', libelle:'Logement', gains:b.gains.logement},
+    {code:'010', libelle:'Nourriture', gains:b.gains.nourriture},
+    {code:'011', libelle:'Congés payés', gains:b.gains.congesPayes},
+    {code:'012', libelle:"Prime exceptionnelle / 13e mois", gains:b.gains.primeExceptionnelle},
+    {code:'013', libelle:'SALAIRE BRUT', gains:b.brut, total:true},
+    {code:'014', libelle:'IPRES RG', base:baseRG, taux:p.ipresRG.salarial*100, retenues:b.retenues.ipresRG, txPat:p.ipresRG.patronal*100, montantPat:b.patronales.ipresRG},
+    {code:'015', libelle:'IPRES RC', base:baseRC, taux:p.ipresRC.salarial*100, retenues:b.retenues.ipresRC, txPat:p.ipresRC.patronal*100, montantPat:b.patronales.ipresRC},
+    {code:'016', libelle:'Impôt sur le revenu', base:b.brut, retenues:b.retenues.ir},
+    {code:'017', libelle:'TRIMF', retenues:b.retenues.trimf},
+    {code:'018', libelle:'Retenue IPM', retenues:b.retenues.ipm},
+    {code:'019', libelle:'CFCE', base:b.brut, txPat:p.cfce*100, montantPat:b.patronales.cfce},
+    {code:'020', libelle:'CSS Allocation familiale', base:baseCSS, txPat:p.css.allocFamiliale*100, montantPat:b.patronales.cssAF},
+    {code:'021', libelle:'CSS Accident du travail', base:baseCSS, txPat:p.css.accidentTravail*100, montantPat:b.patronales.cssAT},
+    {code:'022', libelle:'Avance Tabaski', retenues:b.retenues.tabaski},
+    {code:'023', libelle:'Remboursement prêt', retenues:b.retenues.prets},
+    {code:'024', libelle:'Avance quinzaine', retenues:b.retenues.avanceQuinzaine},
+    {code:'025', libelle:'Autre retenue', retenues:b.retenues.autreRetenue},
+    {code:'026', libelle:'TOTAL DES RETENUES', retenues:b.totalRetenues, montantPat:b.totalPatronal, total:true},
+    {code:'027', libelle:'SALAIRE NET 1', gains:b.net1, total:true},
+    {code:'028', libelle:'Prime de transport', gains:b.indemnites.primeTransport},
+    {code:'029', libelle:'Autres indemnités', gains:b.indemnites.autres},
+    {code:'030', libelle:'Arrondi du mois précédent', gains:b.indemnites.arrondiPrecedent},
+    {code:'031', libelle:'TOTAL DES INDEMNITÉS', gains:b.totalIndemnites, total:true},
+    {code:'033', libelle:'SALAIRE NET 2', gains:b.net2, total:true},
+  ].map(r=>({ ...r, base:r.base!=null?CFA(r.base):'', baseNum:r.base||0, taux:r.taux!=null?(Math.round(r.taux*100)/100)+'%':'', gains:r.gains!=null?CFA(r.gains):'', gainsNum:r.gains||0, retenues:r.retenues!=null?CFA(r.retenues):'', retenuesNum:r.retenues||0, txPat:r.txPat!=null?(Math.round(r.txPat*100)/100)+'%':'', montantPat:r.montantPat!=null?CFA(r.montantPat):'', montantPatNum:r.montantPat||0 }));
+  return {
+    entreprise: { raisonSociale: ent.raisonSociale||'', adresse: ent.adresse||'', telephone: ent.telephone||'', fax: ent.fax||'', ninea: ent.ninea||'', convention: ent.convention||'', logo: ent.logo||'', annee: ent.annee },
+    salarie: { nom: salarie.nom, prenom: salarie.prenom, nomComplet: salarie.nom+' '+salarie.prenom, qualification: salarie.qualification||'', categorie: salarie.categorie||'', situationFamiliale: salarie.situationFamiliale||'', dateEntree: salarie.dateEntree||'', dateNaissance: salarie.dateNaissance||'', lieuNaissance: salarie.lieuNaissance||'', sexe: salarie.sexe||'', nationalite: salarie.nationalite||'', ipresRC: salarie.ipresRC||'NON', nbEnfants: salarie.nbEnfants||0, partsQuotient: b.partsQuotient },
+    periode: { mois: MOIS_LABEL[moisIdx], moisMajuscule: MOIS_LABEL[moisIdx].toUpperCase(), annee: ent.annee },
+    rubriques,
+    brut: b.brut, brutFmt: CFA(b.brut),
+    totalRetenues: b.totalRetenues, totalRetenuesFmt: CFA(b.totalRetenues),
+    totalPatronal: b.totalPatronal, totalPatronalFmt: CFA(b.totalPatronal),
+    netAPayer: b.netAPayer, netAPayerFmt: CFA(b.netAPayer),
+    coutTotalEmployeur: b.coutTotalEmployeur, coutTotalEmployeurFmt: CFA(b.coutTotalEmployeur),
+    arrondiDuMois: b.arrondiDuMois, arrondiDuMoisFmt: CFA(b.arrondiDuMois),
+    tauxAncienneteApplique: Math.round(b.tauxAncienneteApplique*10000)/100
+  };
+}
+const BULLETIN_TEMPLATE_VARS_DOC = [
+  ['entreprise.raisonSociale, entreprise.adresse, entreprise.telephone, entreprise.fax, entreprise.ninea, entreprise.convention, entreprise.annee','Informations de l\'entreprise'],
+  ['entreprise.logo','Logo (image, en base64) — utiliser <img src="{{entreprise.logo}}">'],
+  ['salarie.nomComplet, salarie.qualification, salarie.categorie, salarie.situationFamiliale, salarie.dateEntree, salarie.nbEnfants, salarie.partsQuotient, salarie.ipresRC','Informations du salarié'],
+  ['periode.mois, periode.moisMajuscule, periode.annee','Mois et année du bulletin'],
+  ['brutFmt, totalRetenuesFmt, totalPatronalFmt, netAPayerFmt, coutTotalEmployeurFmt, arrondiDuMoisFmt','Totaux, déjà mis en forme (ex: "350 000 F")'],
+  ['tauxAncienneteApplique','Taux d\'ancienneté du mois, en %, nombre (ex: 4)'],
+  ['{{#each rubriques}} ... {{/each}}','Boucle sur toutes les lignes du bulletin. Dans la boucle : {{code}}, {{libelle}}, {{base}}, {{taux}}, {{gains}}, {{retenues}}, {{txPat}}, {{montantPat}} (déjà mis en forme), et {{total}} (vrai/faux, pour les lignes de sous-total)']
+];
+
 function ensureXLSXLib(){
   if(window.XLSX) return Promise.resolve();
   if(_xlsxLibPromise) return _xlsxLibPromise;
@@ -1296,6 +1404,96 @@ const PERMISSION_LABELS = [
   ['export','Exporter (Excel, sauvegardes)'], ['print','Imprimer / PDF'],
   ['declarations','Déclarations & journal SAGE'], ['reports','Récapitulatif & rapports'], ['params','Paramètres de l\'entreprise']
 ];
+function renderBulletinTemplateCard(){
+  const ent = state.entreprise;
+  const hasCustom = !!ent.bulletinTemplate;
+  const card = el('div',{class:'card'}, el('h3',{},'Modèle de bulletin de paie'),
+    el('div',{class:'help', style:'margin-top:-6px;margin-bottom:14px'}, 'Par défaut, Sunu Paie utilise sa mise en page standard. Si votre entreprise a déjà son propre modèle, vous pouvez l\'importer ici — il sera utilisé pour l\'affichage et l\'impression de tous les bulletins de cette entreprise.')
+  );
+  card.appendChild(el('div',{class:'tag', style:'margin-bottom:14px'}, hasCustom ? 'Modèle personnalisé actif' : 'Modèle standard (par défaut)'));
+
+  const fileInput = el('input',{type:'file', accept:'.html,.htm', style:'display:none'});
+  const textarea = el('textarea',{style:'width:100%;min-height:220px;font-family:monospace;font-size:12px;padding:10px;border:1px solid var(--rule);border-radius:8px;background:#fff'}, ent.bulletinTemplate||'');
+  fileInput.addEventListener('change', (e)=>{
+    const file = e.target.files[0]; if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev)=>{ textarea.value = ev.target.result; };
+    reader.readAsText(file, 'UTF-8');
+    e.target.value = '';
+  });
+
+  card.appendChild(el('div',{class:'btn-row', style:'margin-bottom:10px'},
+    el('button',{class:'btn secondary', onClick:()=>fileInput.click()}, '⇧ Importer un fichier .html'),
+    el('button',{class:'btn secondary', onClick:()=>openBulletinTemplateReferenceModal()}, 'Voir les variables disponibles'),
+    fileInput
+  ));
+  card.appendChild(el('div',{class:'field', style:'margin-bottom:12px'}, label('Modèle HTML (laisser vide pour revenir au modèle standard)'), textarea));
+
+  card.appendChild(el('div',{class:'btn-row'},
+    el('button',{class:'btn secondary', onClick: async ()=>{
+      const tmp = Object.assign({}, ent, {bulletinTemplate: textarea.value.trim()||null});
+      const oldTemplate = state.entreprise.bulletinTemplate;
+      state.entreprise = tmp;
+      await recompileBulletinTemplate();
+      state.entreprise.bulletinTemplate = oldTemplate; // n'affecte pas encore l'entreprise reelle : c'est un apercu
+      if(!state.compiledBulletinTemplate){ alert('Modèle vide ou invalide — impossible de générer un aperçu.'); return; }
+      openBulletinPreviewModal(tmp.bulletinTemplate);
+    }}, 'Aperçu'),
+    el('button',{class:'btn gold', onClick: async ()=>{
+      ent.bulletinTemplate = textarea.value.trim() || null;
+      await save('entreprise', ent);
+      await recompileBulletinTemplate();
+      logActivity(ent.bulletinTemplate ? 'Modèle de bulletin personnalisé activé' : 'Retour au modèle de bulletin standard');
+      alert('Modèle enregistré.');
+      render();
+    }}, 'Enregistrer le modèle')
+  ));
+  return card;
+}
+function openBulletinTemplateReferenceModal(){
+  state.modal = () => {
+    const overlay = el('div',{class:'modal-overlay no-print', onClick:(e)=>{ if(e.target===overlay){ state.modal=null; render(); } }});
+    const modal = el('div',{class:'modal no-print', style:'max-width:640px'},
+      el('h2',{},'Variables disponibles dans un modèle'),
+      el('div',{class:'help', style:'margin-bottom:14px'}, 'Le modèle est écrit en HTML, avec des variables entre doubles accolades (moteur Handlebars). Exemple : ', el('code',{}, '{{salarie.nomComplet}}')),
+      el('table',{},
+        el('tbody',{}, BULLETIN_TEMPLATE_VARS_DOC.map(([vars,desc])=> el('tr',{},
+          el('td',{class:'mono', style:'font-size:11.5px;white-space:normal'}, vars),
+          el('td',{style:'font-size:12.5px'}, desc)
+        )))
+      ),
+      el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn secondary', style:'width:100%', onClick:()=>{ state.modal=null; render(); }}, 'Fermer'))
+    );
+    overlay.appendChild(modal);
+    return overlay;
+  };
+  render();
+}
+function openBulletinPreviewModal(templateHtml){
+  state.modal = () => {
+    const overlay = el('div',{class:'modal-overlay no-print', onClick:(e)=>{ if(e.target===overlay){ state.modal=null; render(); } }});
+    const salarie = state.salaries[0];
+    let bodyContent;
+    if(!salarie){
+      bodyContent = el('div',{class:'empty'}, 'Ajoutez au moins un salarié pour générer un aperçu avec de vraies données.');
+    } else {
+      const context = buildBulletinContext(salarie, getSaisie(salarie.id, state.moisIdx), computeArrondiPrecedent(salarie, state.moisIdx), state.moisIdx);
+      let html;
+      try{ html = Handlebars.compile(templateHtml)(context); }
+      catch(e){ html = '<div style="color:#A23B2E;padding:20px">Erreur dans le modèle : '+e.message+'</div>'; }
+      bodyContent = el('div',{html});
+    }
+    const modal = el('div',{class:'modal no-print', style:'max-width:800px;max-height:85vh;overflow-y:auto'},
+      el('h2',{},'Aperçu du modèle'),
+      el('div',{class:'help', style:'margin-bottom:14px'}, 'Généré avec les données de '+(salarie?salarie.nom+' '+salarie.prenom:'—')+' pour '+MOIS_LABEL[state.moisIdx]+'.'),
+      bodyContent,
+      el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn secondary', style:'width:100%', onClick:()=>{ state.modal=null; render(); }}, 'Fermer'))
+    );
+    overlay.appendChild(modal);
+    return overlay;
+  };
+  render();
+}
 function openUserManagementModal(){
   state.modal = () => {
     const overlay = el('div',{class:'modal-overlay no-print', onClick:(e)=>{ if(e.target===overlay){ state.modal=null; render(); } }});
@@ -1591,6 +1789,15 @@ function ledRow(codeLabel, libelle, base, tauxSal, gains, retenue, tauxPat, patr
   );
 }
 function renderBulletinOnly(salarie, saisieRaw, arrondiPrec, moisIdx){
+  if(state.compiledBulletinTemplate){
+    try{
+      const context = buildBulletinContext(salarie, saisieRaw, arrondiPrec, moisIdx);
+      const html = state.compiledBulletinTemplate(context);
+      return el('div',{class:'bulletin custom-template', html});
+    }catch(e){
+      console.error('Erreur de rendu du modèle personnalisé, repli sur le modèle standard.', e);
+    }
+  }
   const b = calcBulletin(salarie, saisieRaw, arrondiPrec, state.params, moisIdx, state.entreprise.annee);
   const ent = state.entreprise;
   const p = state.params;
@@ -1913,6 +2120,7 @@ function renderParams(main){
       el('div',{class:'help', style:'margin-top:-6px;margin-bottom:12px'}, 'Gérez qui, parmi les personnes ayant activé votre licence, peut accéder à « '+(state.entreprise.raisonSociale||'cette entreprise')+' » et avec quels droits.'),
       el('button',{class:'btn gold', onClick:openUserManagementModal}, 'Gérer les accès à cette entreprise')
     ));
+    main.appendChild(renderBulletinTemplateCard());
   }
 
   const p = state.params;
@@ -1960,6 +2168,63 @@ function renderParams(main){
     el('table',{}, el('thead',{}, el('tr',{}, el('th',{},'Nombre de parts'), el('th',{},'Taux'), el('th',{},'Réduction min'), el('th',{},'Réduction max'))),
       el('tbody',{}, Object.entries(p.quotient).filter(([k])=>k!=='1').map(([k,v])=> el('tr',{}, el('td',{}, k), el('td',{}, (v.taux*100)+'%'), el('td',{}, CFA(v.min)), el('td',{}, CFA(v.max))))))
   ));
+}
+
+/* ---- Installation PWA (bouton "Installer l'application") ---- */
+let deferredInstallPrompt = null;
+let appIsInstalled = false;
+function isRunningStandalone(){
+  return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true;
+}
+function isIOSDevice(){
+  return /iPad|iPhone|iPod/.test(window.navigator.userAgent) && !window.MSStream;
+}
+if(isRunningStandalone()) appIsInstalled = true;
+window.addEventListener('beforeinstallprompt', (e)=>{
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  render();
+});
+window.addEventListener('appinstalled', ()=>{
+  deferredInstallPrompt = null;
+  appIsInstalled = true;
+  render();
+});
+function canOfferInstall(){
+  return !appIsInstalled && (!!deferredInstallPrompt || isIOSDevice());
+}
+function openInstallModal(){
+  if(deferredInstallPrompt){
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt.userChoice.then(()=>{ deferredInstallPrompt = null; render(); });
+    return;
+  }
+  // iOS Safari (et navigateurs sans beforeinstallprompt) : instructions manuelles
+  state.modal = () => {
+    const overlay = el('div',{class:'modal-overlay no-print', onClick:(e)=>{ if(e.target===overlay){ state.modal=null; render(); } }});
+    const modal = el('div',{class:'modal no-print', style:'max-width:420px'},
+      el('h2',{},'Installer Sunu Paie'),
+      el('div',{class:'help', style:'margin-bottom:10px'}, isIOSDevice()
+        ? 'Sur iPhone/iPad (Safari) :'
+        : 'Selon votre navigateur, l\'installation automatique n\'est pas proposée ici. Essayez :'),
+      el('ol',{style:'padding-left:20px;font-size:13.5px;line-height:1.8;color:var(--ink)'},
+        isIOSDevice()
+        ? [el('li',{},'Touchez l\'icône de partage ', el('b',{},'⬆️'),' en bas de l\'écran'),
+           el('li',{},'Faites défiler et touchez ', el('b',{},'« Sur l\'écran d\'accueil »')),
+           el('li',{},'Touchez ', el('b',{},'« Ajouter »'),' en haut à droite')]
+        : [el('li',{},'Ouvrez le menu ⋮ de votre navigateur'),
+           el('li',{},'Cherchez ', el('b',{},'« Installer l\'application »'),' ou ', el('b',{},'« Ajouter à l\'écran d\'accueil »'))]
+      ),
+      el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn secondary', style:'width:100%', onClick:()=>{ state.modal=null; render(); }}, 'Fermer'))
+    );
+    overlay.appendChild(modal);
+    return overlay;
+  };
+  render();
+}
+function installButton(){
+  if(!canOfferInstall()) return null;
+  return el('button',{class:'nav-btn', style:'background:rgba(181,136,58,.18);color:var(--gold-soft)', onClick:openInstallModal}, el('span',{class:'nav-num'},'⇩'), 'Installer l\'application');
 }
 
 ensureBaremeIR();
