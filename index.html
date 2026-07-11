@@ -150,6 +150,10 @@ tr:hover td{background:var(--paper-dim);}
 .led-row.net{background:var(--pine-dark);color:var(--white);font-weight:700;font-size:14px;}
 .led-row.net>div{border-left-color:rgba(255,255,255,.25);}
 .led-row.net .num{color:var(--white);}
+.conges-box{margin:0 24px 14px;padding:12px 16px;background:var(--paper-dim);border-radius:8px;border:1px solid var(--rule);font-size:12px;}
+.conges-box .ct{font-weight:700;color:var(--pine-dark);margin-bottom:6px;font-size:12.5px;}
+.conges-box .cr{display:flex;justify-content:space-between;padding:2px 0;}
+.conges-box .cr.tot{font-weight:700;border-top:1px solid var(--rule);margin-top:4px;padding-top:5px;color:var(--pine-dark);}
 .bulletin-foot{padding:16px 24px;display:flex;justify-content:space-between;font-size:11.5px;color:var(--ink-soft);border-top:1px solid var(--rule);}
 .section-lbl{padding:8px 24px 2px 24px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--gold);background:var(--paper-dim);}
 
@@ -188,6 +192,7 @@ tr:hover td{background:var(--paper-dim);}
   .led-row>div:last-child{padding-right:14px;}
   .led-row.head{font-size:9.5px;}
   .led-row.net{font-size:13.5px;}
+  .conges-box{margin:0 20px 10px;padding:9px 14px;font-size:11px;}
   .bulletin-foot{padding:8px 20px;font-size:10.5px;}
 }
 @media (max-width:900px){
@@ -223,6 +228,133 @@ const DEFAULT_PARAMS = {
 };
 
 const DEFAULT_ENTREPRISE = { raisonSociale:'', adresse:'', telephone:'', fax:'', ninea:'', convention:'COMMERCE', annee:new Date().getFullYear() };
+
+/* ====================================================================
+   MODULE GTA — Gestion des Temps et Absences
+   Types d'absence fournis par défaut (modifiables/désactivables, et
+   l'administrateur peut en ajouter d'autres). "impacteSolde" = décompté
+   du solde de congés payés ; "remunere" = maintien de salaire pendant
+   l'absence ; "presenceParticuliere" = ne compte pas comme une absence
+   au sens strict (ex: télétravail).
+   ==================================================================== */
+const DEFAULT_TYPES_ABSENCE = [
+  {code:'CA',   libelle:'Congé annuel payé',        impacteSolde:true,  remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'CMAT', libelle:'Congé de maternité',        impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'CPAT', libelle:'Congé de paternité',        impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'CMAR', libelle:'Congé de mariage',          impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'CDEC', libelle:'Congé de décès',            impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'CEXC', libelle:'Congé exceptionnel',        impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'PEXC', libelle:'Permission exceptionnelle', impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'AA',   libelle:'Absence autorisée',         impacteSolde:false, remunere:false, presenceParticuliere:false, systeme:true},
+  {code:'ANA',  libelle:'Absence non autorisée',     impacteSolde:false, remunere:false, presenceParticuliere:false, systeme:true},
+  {code:'MAL',  libelle:'Arrêt maladie',             impacteSolde:false, remunere:false, presenceParticuliere:false, systeme:true},
+  {code:'AT',   libelle:'Accident du travail',       impacteSolde:false, remunere:false, presenceParticuliere:false, systeme:true},
+  {code:'FORM', libelle:'Formation',                 impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'MISS', libelle:'Mission',                   impacteSolde:false, remunere:true,  presenceParticuliere:false, systeme:true},
+  {code:'MAP',  libelle:'Mise à pied',               impacteSolde:false, remunere:false, presenceParticuliere:false, systeme:true},
+  {code:'SUSP', libelle:'Suspension du contrat',     impacteSolde:false, remunere:false, presenceParticuliere:false, systeme:true},
+  {code:'TT',   libelle:'Télétravail',                impacteSolde:false, remunere:true,  presenceParticuliere:true,  systeme:true}
+];
+const DEFAULT_PARAMS_GTA = {
+  acquisitionMensuelle: 2.20,          // jours ouvrables acquis par mois de travail effectif
+  joursOuvrablesParMois: 26,           // utilisé pour le calcul de l'indemnité de congé
+  modeArrondi: 'demi_superieur',       // 'aucun' | 'entier_superieur' | 'entier_inferieur' | 'demi_superieur'
+  periodeAcquisition: 'anniversaire',  // 'anniversaire' (date d'entrée) | 'civile' (1er janvier)
+  weekendTravaille: false,             // si vrai, samedi/dimanche comptent comme jours ouvrables
+  joursFeries: [],                     // liste de dates 'jj/mm/aaaa' (calendrier de l'entreprise)
+  majorationAnciennete: [ {anneesMin:15, joursSupp:1}, {anneesMin:20, joursSupp:2}, {anneesMin:25, joursSupp:3} ],
+  formuleIndemnite: { diviseur:26, primesIncluses:[] }, // codes de gains de la saisie à inclure dans le salaire de référence
+  typesAbsence: JSON.parse(JSON.stringify(DEFAULT_TYPES_ABSENCE))
+};
+
+/* ====================================================================
+   GTA ENGINE — moteur de calcul, entièrement pur (aucune lecture ni
+   écriture de `state` à l'intérieur de ces fonctions : tout transite par
+   les paramètres). Peut être déplacé tel quel vers un service séparé
+   (ex: fonction Supabase Edge) sans rien réécrire, le jour où une
+   application mobile devra réutiliser exactement les mêmes règles.
+   ==================================================================== */
+const GTAEngine = (function(){
+  function parseFR(d){
+    if(!d) return null;
+    const parts = String(d).split('/');
+    if(parts.length!==3) return null;
+    let [j,m,a] = parts.map(x=>parseInt(x,10));
+    if(!j||!m||!a) return null;
+    if(a<100) a+=2000;
+    const dt = new Date(a,m-1,j);
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+  function fmtFR(dt){
+    return String(dt.getDate()).padStart(2,'0')+'/'+String(dt.getMonth()+1).padStart(2,'0')+'/'+dt.getFullYear();
+  }
+  // Nombre de mois pleins travaillés entre deux dates (utilisé pour l'acquisition proratisée)
+  function moisTravaillesEntre(dateDebut, dateFin){
+    if(!dateDebut || !dateFin || dateFin < dateDebut) return 0;
+    let mois = (dateFin.getFullYear()-dateDebut.getFullYear())*12 + (dateFin.getMonth()-dateDebut.getMonth());
+    if(dateFin.getDate() < dateDebut.getDate()) mois -= 1;
+    return Math.max(0, mois);
+  }
+  function appliquerArrondi(valeur, mode){
+    switch(mode){
+      case 'entier_superieur': return Math.ceil(valeur);
+      case 'entier_inferieur': return Math.floor(valeur);
+      case 'demi_superieur': return Math.ceil(valeur*2)/2;
+      case 'aucun': default: return Math.round(valeur*100)/100;
+    }
+  }
+  // Majoration de jours supplémentaires selon un tableau {anneesMin, joursSupp} paramétrable
+  function majorationAnciennete(anneesAnciennete, tableau){
+    let jours = 0;
+    (tableau||[]).forEach(palier=>{ if(anneesAnciennete >= palier.anneesMin) jours = Math.max(jours, palier.joursSupp); });
+    return jours;
+  }
+  // Nombre de jours ouvrables entre deux dates incluses, selon jours fériés et week-end travaillé ou non
+  function joursOuvrablesEntre(dateDebut, dateFin, joursFeriesStr, weekendTravaille){
+    if(!dateDebut || !dateFin || dateFin < dateDebut) return 0;
+    const feries = new Set((joursFeriesStr||[]).map(d=>d)); // comparaison par chaîne jj/mm/aaaa
+    let count = 0;
+    const cur = new Date(dateDebut);
+    while(cur <= dateFin){
+      const jourSemaine = cur.getDay(); // 0=dimanche, 6=samedi
+      const estWeekend = (jourSemaine===0 || jourSemaine===6);
+      const dateStr = fmtFR(cur);
+      if((weekendTravaille || !estWeekend) && !feries.has(dateStr)) count++;
+      cur.setDate(cur.getDate()+1);
+    }
+    return count;
+  }
+  // Acquisition annuelle de congés (jours), proratisée si le salarié n'a pas travaillé toute la période
+  function calculAcquisitionAnnuelle(dateEntree, dateSortie, dateRefDebut, dateRefFin, paramsGTA, anneesAnciennete){
+    const de = parseFR(dateEntree) || dateRefDebut;
+    const ds = dateSortie ? parseFR(dateSortie) : null;
+    const debutEffectif = de > dateRefDebut ? de : dateRefDebut;
+    const finEffective = (ds && ds < dateRefFin) ? ds : dateRefFin;
+    const moisTravailles = moisTravaillesEntre(debutEffectif, finEffective) + 1; // +1 pour inclure le mois en cours
+    const base = Math.max(0, Math.min(12, moisTravailles)) * paramsGTA.acquisitionMensuelle;
+    const majoration = majorationAnciennete(anneesAnciennete, paramsGTA.majorationAnciennete);
+    return appliquerArrondi(base + majoration, paramsGTA.modeArrondi);
+  }
+  // Solde de congés d'un salarié à une date donnée, à partir de son historique d'absences
+  function calculSolde(soldeInitial, acquisitionAnnuelle, absencesDuSalarie, typesAbsence){
+    const typesImpactants = new Set((typesAbsence||[]).filter(t=>t.impacteSolde).map(t=>t.code));
+    let joursPris = 0, joursAnnules = 0, joursReportes = 0;
+    (absencesDuSalarie||[]).forEach(a=>{
+      if(!typesImpactants.has(a.typeCode)) return;
+      if(a.statut === 'annulé') joursAnnules += Number(a.nbJours)||0;
+      else if(a.statut === 'reporté') joursReportes += Number(a.nbJours)||0;
+      else joursPris += Number(a.nbJours)||0;
+    });
+    const soldeDisponible = (Number(soldeInitial)||0) + (Number(acquisitionAnnuelle)||0) - joursPris + joursReportes;
+    return { soldeInitial:Number(soldeInitial)||0, acquisitionAnnuelle:Number(acquisitionAnnuelle)||0, joursPris, joursAnnules, joursReportes, soldeDisponible: Math.round(soldeDisponible*100)/100 };
+  }
+  // Indemnité de congé = salaire de référence × (nombre de jours ÷ diviseur paramétrable, 26 par défaut)
+  function calculIndemniteConge(salaireReference, nbJours, formuleIndemnite){
+    const diviseur = (formuleIndemnite && formuleIndemnite.diviseur) || 26;
+    return Math.round((Number(salaireReference)||0) * ((Number(nbJours)||0) / diviseur));
+  }
+  return { parseFR, fmtFR, moisTravaillesEntre, appliquerArrondi, majorationAnciennete, joursOuvrablesEntre, calculAcquisitionAnnuelle, calculSolde, calculIndemniteConge };
+})();
 
 function emptySaisie(){
   return { salaireBase:0, sursalaire:0, heuresSup:0, autreGain:0, autresIndemnites:0, logement:0, nourriture:0, congesPayes:0, primeExceptionnelle:0,
@@ -401,7 +533,7 @@ const SEED_DATA = JSON.parse(`{"entreprise": {"raisonSociale": "PHARMACIE SICAP-
 const SUPABASE_URL = 'https://eoilitbbinrcvkpmjygl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvaWxpdGJiaW5yY3ZrcG1qeWdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM3MDUxNDksImV4cCI6MjA5OTI4MTE0OX0.qapfd_IyN_qsubmEmvCqsTl1cxUIWr0WmtIgZlUFhIM';
 
-const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, salaries:[], saisies:{}, arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'' };
+const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, paramsGTA:null, salaries:[], saisies:{}, absences:{}, absencesHistorique:[], absencesVue:'salarie', arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'' };
 
 /* ---- Chargement du client Supabase ---- */
 let _supabaseLibPromise = null;
@@ -566,8 +698,11 @@ function openCompanyWithData(id, blob){
   state.companyId = id;
   state.entreprise = blob?.entreprise || Object.assign({},DEFAULT_ENTREPRISE);
   state.params = blob?.params || JSON.parse(JSON.stringify(DEFAULT_PARAMS));
+  state.paramsGTA = blob?.paramsGTA || JSON.parse(JSON.stringify(DEFAULT_PARAMS_GTA));
   state.salaries = blob?.salaries || [];
   state.saisies = blob?.saisies || {};
+  state.absences = blob?.absences || {};
+  state.absencesHistorique = blob?.absencesHistorique || [];
   state.arrondisInit = blob?.arrondisInit || {};
   state.activityLog = blob?.activityLog || [];
   state.compiledBulletinTemplate = null;
@@ -580,11 +715,11 @@ function openCompanyWithData(id, blob){
 }
 function closeCompany(){
   state.companyId = null;
-  state.entreprise = DEFAULT_ENTREPRISE; state.params = DEFAULT_PARAMS; state.salaries=[]; state.saisies={}; state.arrondisInit={};
+  state.entreprise = DEFAULT_ENTREPRISE; state.params = DEFAULT_PARAMS; state.paramsGTA = null; state.salaries=[]; state.saisies={}; state.absences={}; state.absencesHistorique=[]; state.arrondisInit={};
   render();
 }
 async function createCompany(nom){
-  const blob = { entreprise: Object.assign({},DEFAULT_ENTREPRISE,{raisonSociale:nom}), params: JSON.parse(JSON.stringify(DEFAULT_PARAMS)), salaries:[], saisies:{}, arrondisInit:{} };
+  const blob = { entreprise: Object.assign({},DEFAULT_ENTREPRISE,{raisonSociale:nom}), params: JSON.parse(JSON.stringify(DEFAULT_PARAMS)), paramsGTA: JSON.parse(JSON.stringify(DEFAULT_PARAMS_GTA)), salaries:[], saisies:{}, absences:{}, arrondisInit:{} };
   const { data, error } = await sb.from('companies').insert({ license_key: state.profile.license_key, nom, data: blob }).select().single();
   if(error){ alert('Erreur lors de la création de l\'entreprise : '+error.message); return null; }
   state.companies.push({id:data.id, nom});
@@ -596,7 +731,7 @@ async function deleteCompany(id){
 }
 async function save(key, value){
   if(!state.companyId) return;
-  const blob = { entreprise: state.entreprise, params: state.params, salaries: state.salaries, saisies: state.saisies, arrondisInit: state.arrondisInit, activityLog: state.activityLog };
+  const blob = { entreprise: state.entreprise, params: state.params, paramsGTA: state.paramsGTA, salaries: state.salaries, saisies: state.saisies, absences: state.absences, absencesHistorique: state.absencesHistorique, arrondisInit: state.arrondisInit, activityLog: state.activityLog };
   await sb.from('companies').update({ data: blob, updated_at: new Date().toISOString() }).eq('id', state.companyId);
 }
 function logActivity(description){
@@ -661,9 +796,10 @@ function render(){
     navBtn('dashboard','01','Tableau de bord'),
     can('salaries') ? navBtn('salaries','02','Salariés') : null,
     navBtn('saisie','03','Saisie & bulletin'),
-    navBtn('bulletins','04','Bulletins du mois'),
-    (can('declarations')||can('reports')) ? navBtn('recap','05','Récapitulatif annuel') : null,
-    can('params') ? navBtn('params','06','Paramètres') : null,
+    can('salaries') ? navBtn('absences','04','Congés & absences') : null,
+    navBtn('bulletins','05','Bulletins du mois'),
+    (can('declarations')||can('reports')) ? navBtn('recap','06','Récapitulatif annuel') : null,
+    can('params') ? navBtn('params','07','Paramètres') : null,
     el('div',{style:'flex:1'}),
     el('div',{style:'padding:10px 12px 2px 12px;font-size:11px;color:rgba(255,255,255,.55)'}, 'Connecté : '+(state.profile.email||'')+(state.profile.is_admin?' (admin)':'')),
     installButton(),
@@ -671,11 +807,12 @@ function render(){
     el('button',{class:'nav-btn', onClick:signOutUser}, el('span',{class:'nav-num'},'⏻'), 'Se déconnecter')
   );
   const main = el('div',{class:'main'});
-  const allowed = { dashboard:true, salaries:can('salaries'), saisie:true, bulletins:true, recap:(can('declarations')||can('reports')), params:can('params') };
+  const allowed = { dashboard:true, salaries:can('salaries'), saisie:true, absences:can('salaries'), bulletins:true, recap:(can('declarations')||can('reports')), params:can('params') };
   if(!allowed[state.tab]) state.tab = 'dashboard';
   if(state.tab==='dashboard') renderDashboard(main);
   else if(state.tab==='salaries') renderSalaries(main);
   else if(state.tab==='saisie') renderSaisie(main);
+  else if(state.tab==='absences') renderAbsences(main);
   else if(state.tab==='bulletins') renderBulletinsMois(main);
   else if(state.tab==='recap') renderRecap(main);
   else if(state.tab==='params') renderParams(main);
@@ -1109,6 +1246,19 @@ let _xlsxLibPromise = null;
    utilisé à la place, pour l'affichage comme pour l'impression.
    ==================================================================== */
 let _handlebarsLibPromise = null;
+let _chartJSLibPromise = null;
+function ensureChartJS(){
+  if(window.Chart) return Promise.resolve();
+  if(_chartJSLibPromise) return _chartJSLibPromise;
+  _chartJSLibPromise = new Promise((resolve,reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js';
+    s.onload = ()=>resolve();
+    s.onerror = ()=>reject(new Error('Impossible de charger la librairie de graphiques.'));
+    document.head.appendChild(s);
+  });
+  return _chartJSLibPromise;
+}
 function ensureHandlebars(){
   if(window.Handlebars) return Promise.resolve();
   if(_handlebarsLibPromise) return _handlebarsLibPromise;
@@ -1205,6 +1355,45 @@ function ensureXLSXLib(){
     document.head.appendChild(s);
   });
   return _xlsxLibPromise;
+}
+const DNS_NATURE_CONTRAT_MAP = { 'CDI':'CDI', 'CDD':'CDD', 'Stage':'STA', 'Essai':'CDI' };
+function buildDNSRows(moisIdx, annee){
+  return state.salaries.map(s=>{
+    const saisie = getSaisie(s.id, moisIdx);
+    const arrondiPrec = computeArrondiPrecedent(s, moisIdx);
+    const b = calcBulletin(s, saisie, arrondiPrec, state.params, moisIdx, annee);
+    return [
+      s.numeroAssureSocial||'', s.nom||'', s.prenom||'', s.typePieceIdentite||'NIN', s.numeroPiece||'',
+      DNS_NATURE_CONTRAT_MAP[s.typeContrat]||'CDI', Math.round(b.brut), 173.33, s.cadre==='OUI'?'OUI':'NON'
+    ];
+  });
+}
+async function exportDNS(moisIndexes, annee){
+  try{ await ensureXLSXLib(); } catch(e){ alert(e.message); return; }
+  const ent = state.entreprise;
+  if(!ent.numeroUniqueEmployeur || String(ent.numeroUniqueEmployeur).trim().length!==10){
+    if(!confirm('Le N° Unique Employeur (10 chiffres, dans Paramètres) n\'est pas renseigné ou ne fait pas 10 chiffres. Générer quand même le fichier (à corriger vous-même dans Excel) ?')) return;
+  }
+  const wb = XLSX.utils.book_new();
+  moisIndexes.forEach(moisIdx=>{
+    const rows = [
+      ["Informations de L'employeur"],
+      ['NUMERO UNIQUE EMPLOYEUR','Année','Mois'],
+      [ent.numeroUniqueEmployeur||'', annee, MOIS_LABEL[moisIdx].toUpperCase()],
+      [],
+      ['Informations des salariés'],
+      ['Numéro Assuré Social','Nom','Prénom','Type piéce','Numéro piéce','Type de contrat','Salaire brut assujetti','Temps de présence Heures','Cadre (oui/non)'],
+      ...buildDNSRows(moisIdx, annee)
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:20},{wch:18},{wch:18},{wch:14},{wch:16},{wch:16},{wch:20},{wch:14},{wch:12}];
+    XLSX.utils.book_append_sheet(wb, ws, MOIS_LABEL[moisIdx].slice(0,28));
+  });
+  const label = moisIndexes.length>1 ? ('T'+(Math.floor(moisIndexes[0]/3)+1)) : MOIS_LABEL[moisIndexes[0]];
+  XLSX.writeFile(wb, 'DNS_IPRES_CSS_'+label+'_'+annee+'.xlsx');
+  if(!state.salaries.some(s=>s.numeroAssureSocial)){
+    alert('Rappel : le numéro d\'assuré social IPRES n\'est renseigné pour aucun salarié — pensez à le compléter dans leur fiche pour un fichier vraiment prêt à déposer.');
+  }
 }
 function buildJournalLignes(t, libelleMois){
   const r2 = n => Math.round(n||0);
@@ -1617,7 +1806,7 @@ function deleteSalarie(id){
   render();
 }
 function openSalarieModal(existing){
-  const s = existing ? Object.assign({},existing) : { id:uid(), nom:'', prenom:'', dateNaissance:'', lieuNaissance:'', dateEntree:'', dateSortie:'', categorie:'', situationFamiliale:'Célibataire', qualification:'', sexe:'F', nationalite:'S', nbEnfants:0, ipresRC:'NON', congesAcquis:0, typeContrat:'CDI', finPeriodeEssai:'', congesPris:[] };
+  const s = existing ? Object.assign({},existing) : { id:uid(), nom:'', prenom:'', dateNaissance:'', lieuNaissance:'', dateEntree:'', dateSortie:'', categorie:'', situationFamiliale:'Célibataire', qualification:'', sexe:'F', nationalite:'S', nbEnfants:0, ipresRC:'NON', congesAcquis:0, typeContrat:'CDI', finPeriodeEssai:'', congesPris:[], numeroAssureSocial:'', typePieceIdentite:'NIN', numeroPiece:'', cadre:'NON', gtaSoldeInitial:0 };
   if(!s.congesPris) s.congesPris = [];
   state.modal = () => {
     const f = (key,lbl,type='text',opts=null)=>{
@@ -1643,9 +1832,11 @@ function openSalarieModal(existing){
       el('div',{class:'grid grid-2'}, f('nom','Nom'), f('prenom','Prénom')),
       el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('dateNaissance','Date de naissance (jj/mm/aaaa)'), f('lieuNaissance','Lieu de naissance'), f('sexe','Sexe',null,['F','M'])),
       el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('dateEntree','Date d\'entrée (jj/mm/aaaa)'), f('dateSortie','Date de sortie'), f('nationalite','Nationalité',null,['S','E'])),
-      el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('typeContrat','Type de contrat',null,['CDI','CDD','Stage','Essai']), f('finPeriodeEssai','Fin de période d\'essai (jj/mm/aaaa)'), null),
+      el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('typeContrat','Type de contrat',null,['CDI','CDD','Stage','Essai']), f('finPeriodeEssai','Fin de période d\'essai (jj/mm/aaaa)'), f('cadre','Statut cadre',null,['NON','OUI'])),
+      el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('numeroAssureSocial','N° Assuré Social IPRES (10 chiffres)'), f('typePieceIdentite','Type de pièce d\'identité',null,['NIN','CDAO','PASS','CONC','IDF']), f('numeroPiece','N° de la pièce d\'identité')),
       el('div',{class:'grid grid-2', style:'margin-top:10px'}, f('qualification','Qualification / poste'), f('categorie','Catégorie (convention collective)')),
       el('div',{class:'grid grid-2', style:'margin-top:10px'}, f('situationFamiliale','Situation familiale',null,['Célibataire','Marié','Mariée','Divorcé(e)','Veuf/Veuve']), f('congesAcquis','Solde congés payés acquis (F CFA)','number')),
+      el('div',{style:'max-width:260px;margin-top:10px'}, f('gtaSoldeInitial','Solde de congés initial (en jours, module Congés & absences)','number')),
       el('div',{class:'divider'}),
       el('h3',{style:'font-size:13px;margin-bottom:8px'}, 'Paramètres de paie'),
       el('div',{style:'max-width:260px;margin-top:10px'}, f('nbEnfants','Nombre d\'enfants à charge','number')),
@@ -1692,6 +1883,264 @@ function computeArrondiPrecedent(salarie, moisIdx){
   let arrondi = state.arrondisInit[salarie.id]||0;
   for(let m=0;m<moisIdx;m++){ const b = calcBulletin(salarie, getSaisie(salarie.id,m), arrondi, state.params, m, state.entreprise.annee); arrondi = b.arrondiDuMois; }
   return arrondi;
+}
+/* ---- Congés & absences (module GTA) ---- */
+function getAbsencesSalarie(salId){ return state.absences[salId] || []; }
+function setAbsencesSalarie(salId, list){ state.absences[salId] = list; save('absences', state.absences); }
+function anneesAncienneteA(salarie, dateRef){
+  const de = GTAEngine.parseFR(salarie.dateEntree);
+  if(!de) return 0;
+  let annees = dateRef.getFullYear() - de.getFullYear();
+  if((dateRef.getMonth() < de.getMonth()) || (dateRef.getMonth()===de.getMonth() && dateRef.getDate()<de.getDate())) annees--;
+  return Math.max(0, annees);
+}
+function emptyAbsence(){ return { id:uid(), typeCode: (state.paramsGTA.typesAbsence[0]||{}).code||'CA', dateDebut:'', dateFin:'', nbJours:0, calculAuto:true, motif:'', observations:'', statut:'validé', dateCreation:new Date().toISOString() }; }
+function logAbsenceHistorique(salarie, action, ancienneValeur, nouvelleValeur, motif){
+  state.absencesHistorique.unshift({
+    date: new Date().toISOString(),
+    utilisateur: state.profile?.email || 'inconnu',
+    salarieId: salarie.id, salarieNom: salarie.nom+' '+salarie.prenom,
+    action, ancienneValeur: ancienneValeur||'', nouvelleValeur: nouvelleValeur||'', motif: motif||''
+  });
+  if(state.absencesHistorique.length > 1000) state.absencesHistorique.length = 1000;
+  save('absencesHistorique', state.absencesHistorique);
+}
+function renderAbsences(main){
+  main.appendChild(el('div',{class:'topbar'}, el('div',{}, el('h1',{},'Congés & absences'), el('div',{class:'subtitle'},'Suivi du solde de congés, saisie des absences et rapports, conforme au Code du travail sénégalais.'))));
+  const vue = state.absencesVue || 'salarie';
+  const tabBtn = (v,l)=> el('button',{class: v===vue?'btn gold':'btn secondary', style:'margin-right:8px', onClick:()=>{ state.absencesVue=v; render(); }}, l);
+  main.appendChild(el('div',{class:'btn-row no-print', style:'margin-bottom:18px'}, tabBtn('salarie','Par salarié'), tabBtn('dashboard','Tableau de bord'), tabBtn('rapports','Rapports')));
+  if(!state.salaries.length){
+    main.appendChild(el('div',{class:'card'}, el('div',{class:'empty'}, el('h3',{},'Aucun salarié'), el('div',{},'Ajoutez d\'abord un salarié dans l\'onglet « Salariés ».'))));
+    return;
+  }
+  if(vue==='dashboard') renderAbsencesDashboard(main);
+  else if(vue==='rapports') renderAbsencesRapports(main);
+  else renderAbsencesParSalarie(main);
+}
+function calculSituationAnnuelle(salarie){
+  const paramsGTA = state.paramsGTA;
+  const annee = state.entreprise.annee || new Date().getFullYear();
+  const refDebut = new Date(annee, 0, 1), refFin = new Date(annee, 11, 31);
+  const anneesAnc = anneesAncienneteA(salarie, refFin);
+  const acquisitionAnnuelle = GTAEngine.calculAcquisitionAnnuelle(salarie.dateEntree, salarie.dateSortie, refDebut, refFin, paramsGTA, anneesAnc);
+  const absencesSalarie = getAbsencesSalarie(salarie.id);
+  const soldeInitial = salarie.gtaSoldeInitial || 0;
+  const solde = GTAEngine.calculSolde(soldeInitial, acquisitionAnnuelle, absencesSalarie, paramsGTA.typesAbsence);
+  return { anneesAnc, acquisitionAnnuelle, absencesSalarie, solde };
+}
+function renderAbsencesDashboard(main){
+  const paramsGTA = state.paramsGTA;
+  const annee = state.entreprise.annee || new Date().getFullYear();
+  const aujourdHui = new Date();
+  let nbAbsentsAujourdhui = 0, nbEnConge = 0, congesRestants = 0, congesConsommes = 0;
+  const parType = {}; paramsGTA.typesAbsence.forEach(t=> parType[t.code] = 0);
+  const parMois = Array(12).fill(0);
+  const typesImpactants = new Set(paramsGTA.typesAbsence.filter(t=>t.impacteSolde).map(t=>t.code));
+
+  state.salaries.forEach(s=>{
+    const { solde, absencesSalarie } = calculSituationAnnuelle(s);
+    congesRestants += solde.soldeDisponible;
+    congesConsommes += solde.joursPris;
+    let estAbsentAujourdhui = false;
+    absencesSalarie.forEach(a=>{
+      if(a.statut==='annulé') return;
+      parType[a.typeCode] = (parType[a.typeCode]||0) + (Number(a.nbJours)||0);
+      const dd = GTAEngine.parseFR(a.dateDebut), df = GTAEngine.parseFR(a.dateFin);
+      if(dd && dd.getFullYear()===annee) parMois[dd.getMonth()] += Number(a.nbJours)||0;
+      if(dd && df && aujourdHui>=dd && aujourdHui<=df) estAbsentAujourdhui = true;
+      if(dd && df && aujourdHui>=dd && aujourdHui<=df && typesImpactants.has(a.typeCode)) nbEnConge++;
+    });
+    if(estAbsentAujourdhui) nbAbsentsAujourdhui++;
+  });
+  const joursOuvrablesTheoriques = state.salaries.length * paramsGTA.joursOuvrablesParMois * 12;
+  const tauxAbsence = joursOuvrablesTheoriques>0 ? Math.round((congesConsommes/joursOuvrablesTheoriques)*10000)/100 : 0;
+
+  main.appendChild(el('div',{class:'kpi-row'},
+    kpi(nbAbsentsAujourdhui, 'Salariés absents aujourd\'hui'),
+    kpi(nbEnConge, 'Salariés en congé aujourd\'hui'),
+    kpi(Math.round(congesRestants*100)/100+' j', 'Congés restants (entreprise)'),
+    kpi(Math.round(congesConsommes*100)/100+' j', 'Congés consommés '+annee)
+  ));
+  main.appendChild(el('div',{class:'kpi-row'}, kpi(tauxAbsence+' %', 'Taux d\'absence (jours pris / jours ouvrables théoriques)')));
+
+  const chartsRow = el('div',{class:'grid grid-2', style:'gap:18px'});
+  const cardPie = el('div',{class:'card'}, el('h3',{},'Répartition par type d\'absence'));
+  const canvasPie = el('canvas',{width:400,height:280});
+  cardPie.appendChild(canvasPie);
+  const cardBar = el('div',{class:'card'}, el('h3',{},'Évolution mensuelle (jours pris)'));
+  const canvasBar = el('canvas',{width:400,height:280});
+  cardBar.appendChild(canvasBar);
+  chartsRow.appendChild(cardPie); chartsRow.appendChild(cardBar);
+  main.appendChild(chartsRow);
+
+  ensureChartJS().then(()=>{
+    const labels = Object.keys(parType).filter(k=>parType[k]>0);
+    if(labels.length && canvasPie.getContext){
+      new Chart(canvasPie, { type:'doughnut', data:{ labels: labels.map(c=>(paramsGTA.typesAbsence.find(t=>t.code===c)||{}).libelle||c), datasets:[{ data: labels.map(c=>parType[c]), backgroundColor:['#0E4A3B','#9C7530','#8FBFA6','#C0492F','#5B6660','#E9D9B6','#0A3428','#B5883A','#D8CFB8','#6B8F7F','#A23B2E','#7A9B87'] }] }, options:{ plugins:{ legend:{ position:'bottom', labels:{ font:{size:11} } } } } });
+    }
+    if(canvasBar.getContext){
+      new Chart(canvasBar, { type:'bar', data:{ labels: MOIS_LABEL.map(m=>m.slice(0,3)), datasets:[{ label:'Jours d\'absence', data: parMois, backgroundColor:'#0E4A3B' }] }, options:{ plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true } } } });
+    }
+  }).catch(e=>{ cardPie.appendChild(el('div',{class:'help'}, e.message)); });
+}
+function renderAbsencesRapports(main){
+  const paramsGTA = state.paramsGTA;
+  const rapportsData = state.salaries.map(s=>({ s, ...calculSituationAnnuelle(s) }));
+
+  // --- Solde des congés / Congés restant à prendre ---
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Solde des congés — tous salariés'),
+    el('table',{class:'recap-table'},
+      el('thead',{}, el('tr',{}, el('th',{},'Salarié'), th_num('Solde initial'), th_num('Acquis'), th_num('Pris'), th_num('Disponible'))),
+      el('tbody',{}, rapportsData.slice().sort((a,b)=>b.solde.soldeDisponible-a.solde.soldeDisponible).map(({s,solde})=>
+        el('tr',{}, el('td',{}, s.nom+' '+s.prenom), td_num(solde.soldeInitial+' j'), td_num(solde.acquisitionAnnuelle+' j'), td_num(solde.joursPris+' j'), td_num(el('b',{}, solde.soldeDisponible+' j')))
+      ))
+    )
+  ));
+
+  // --- Salariés ayant un solde élevé (top 5) ---
+  const soldeEleve = rapportsData.slice().sort((a,b)=>b.solde.soldeDisponible-a.solde.soldeDisponible).slice(0,5);
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Salariés ayant un solde élevé (top 5)'),
+    el('div',{class:'help', style:'margin-top:-8px;margin-bottom:10px'}, 'Utile pour anticiper les congés à planifier avant qu\'ils ne s\'accumulent trop.'),
+    el('table',{class:'recap-table'},
+      el('thead',{}, el('tr',{}, el('th',{},'Salarié'), th_num('Solde disponible'))),
+      el('tbody',{}, soldeEleve.map(({s,solde})=> el('tr',{}, el('td',{}, s.nom+' '+s.prenom), td_num(el('b',{},solde.soldeDisponible+' j')))))
+    )
+  ));
+
+  // --- Congés par service (proxy : catégorie) ---
+  const parCategorie = {};
+  rapportsData.forEach(({s,solde})=>{
+    const cat = s.categorie || 'Non renseignée';
+    if(!parCategorie[cat]) parCategorie[cat] = {jours:0, nb:0};
+    parCategorie[cat].jours += solde.joursPris; parCategorie[cat].nb++;
+  });
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Congés par service (catégorie)'),
+    el('table',{class:'recap-table'},
+      el('thead',{}, el('tr',{}, el('th',{},'Catégorie'), th_num('Salariés'), th_num('Jours pris cette année'))),
+      el('tbody',{}, Object.entries(parCategorie).map(([cat,v])=> el('tr',{}, el('td',{}, cat), td_num(v.nb), td_num(v.jours+' j'))))
+    )
+  ));
+
+  // --- Historique complet (audit) ---
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Historique complet (audit)'),
+    el('div',{class:'help', style:'margin-top:-8px;margin-bottom:10px'}, '1000 dernières actions sur les congés et absences, tous salariés confondus.'),
+    !state.absencesHistorique.length ? el('div',{class:'empty'}, 'Aucune action enregistrée pour l\'instant.') :
+    el('table',{class:'recap-table'},
+      el('thead',{}, el('tr',{}, el('th',{},'Date'), el('th',{},'Utilisateur'), el('th',{},'Salarié'), el('th',{},'Action'), el('th',{},'Ancienne valeur'), el('th',{},'Nouvelle valeur'), el('th',{},'Motif'))),
+      el('tbody',{}, state.absencesHistorique.slice(0,80).map(h=> el('tr',{},
+        el('td',{class:'mono', style:'font-size:11px;white-space:nowrap'}, new Date(h.date).toLocaleString('fr-FR')),
+        el('td',{style:'font-size:12px'}, h.utilisateur), el('td',{}, h.salarieNom), el('td',{}, h.action),
+        el('td',{style:'font-size:12px'}, h.ancienneValeur||'—'), el('td',{style:'font-size:12px'}, h.nouvelleValeur||'—'), el('td',{}, h.motif||'—')
+      )))
+    )
+  ));
+
+  // --- Export global ---
+  main.appendChild(el('div',{class:'card', style:'text-align:center'}, el('h3',{},'Exporter les rapports'),
+    el('button',{class:'btn gold', onClick: async ()=>{
+      try{ await ensureXLSXLib(); } catch(e){ alert(e.message); return; }
+      const wb = XLSX.utils.book_new();
+      const wsSolde = XLSX.utils.aoa_to_sheet([['Salarié','Solde initial','Acquis','Pris','Disponible'], ...rapportsData.map(({s,solde})=>[s.nom+' '+s.prenom, solde.soldeInitial, solde.acquisitionAnnuelle, solde.joursPris, solde.soldeDisponible])]);
+      XLSX.utils.book_append_sheet(wb, wsSolde, 'Solde des congés');
+      const wsHist = XLSX.utils.aoa_to_sheet([['Date','Utilisateur','Salarié','Action','Ancienne valeur','Nouvelle valeur','Motif'], ...state.absencesHistorique.map(h=>[new Date(h.date).toLocaleString('fr-FR'), h.utilisateur, h.salarieNom, h.action, h.ancienneValeur, h.nouvelleValeur, h.motif])]);
+      XLSX.utils.book_append_sheet(wb, wsHist, 'Historique');
+      XLSX.writeFile(wb, 'Rapports_conges_absences_'+(state.entreprise.annee||'')+'.xlsx');
+    }}, '⇩ Exporter tous les rapports (.xlsx)')
+  ));
+}
+function renderAbsencesParSalarie(main){
+  if(!state.salarieSel || !state.salaries.some(s=>s.id===state.salarieSel)) state.salarieSel = state.salaries[0].id;
+  const salSel = el('select',{}, state.salaries.map(s=> el('option',{value:s.id, ...(state.salarieSel===s.id?{selected:'selected'}:{})}, s.nom+' '+s.prenom)));
+  salSel.addEventListener('change', e=>{ state.salarieSel = e.target.value; render(); });
+  main.appendChild(el('div',{class:'select-row no-print'}, el('div',{class:'field'}, label('Salarié'), salSel)));
+
+  const salarie = state.salaries.find(s=>s.id===state.salarieSel);
+  if(!salarie) return;
+  const paramsGTA = state.paramsGTA;
+  const annee = state.entreprise.annee || new Date().getFullYear();
+  const refDebut = new Date(annee, 0, 1), refFin = new Date(annee, 11, 31);
+  const anneesAnc = anneesAncienneteA(salarie, refFin);
+  const acquisitionAnnuelle = GTAEngine.calculAcquisitionAnnuelle(salarie.dateEntree, salarie.dateSortie, refDebut, refFin, paramsGTA, anneesAnc);
+  const absencesSalarie = getAbsencesSalarie(salarie.id);
+  const soldeInitial = salarie.gtaSoldeInitial || 0;
+  const solde = GTAEngine.calculSolde(soldeInitial, acquisitionAnnuelle, absencesSalarie, paramsGTA.typesAbsence);
+
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Solde de congés '+annee+' — '+salarie.nom+' '+salarie.prenom),
+    el('div',{class:'kpi-row'},
+      kpi(solde.soldeInitial+' j', 'Solde initial'),
+      kpi(solde.acquisitionAnnuelle+' j', 'Acquis en '+annee),
+      kpi(solde.joursPris+' j', 'Pris cette année'),
+      kpi(solde.soldeDisponible+' j', 'Solde disponible')
+    ),
+    el('div',{class:'help', style:'margin-top:10px'}, 'Ancienneté : '+anneesAnc+' an(s) — majoration éventuelle déjà incluse dans l\'acquis. Solde initial modifiable dans la fiche du salarié (à renseigner une fois, lors de la mise en place).')
+  ));
+
+  const formCard = el('div',{class:'card'}, el('h3',{},'Déclarer une absence'));
+  const na = emptyAbsence();
+  const typeSel = el('select',{}, paramsGTA.typesAbsence.map(t=> el('option',{value:t.code}, t.libelle)));
+  typeSel.addEventListener('change', e=> na.typeCode = e.target.value);
+  const debutIn = el('input',{type:'text', placeholder:'jj/mm/aaaa'});
+  const finIn = el('input',{type:'text', placeholder:'jj/mm/aaaa'});
+  const joursIn = el('input',{type:'number', value:0});
+  const autoChk = el('input',{type:'checkbox', checked:'checked'});
+  const recalc = ()=>{
+    if(!autoChk.checked) return;
+    const dd = GTAEngine.parseFR(debutIn.value), df = GTAEngine.parseFR(finIn.value);
+    if(dd && df && df>=dd){ joursIn.value = GTAEngine.joursOuvrablesEntre(dd, df, paramsGTA.joursFeries, paramsGTA.weekendTravaille); }
+  };
+  debutIn.addEventListener('input', recalc); finIn.addEventListener('input', recalc);
+  autoChk.addEventListener('change', ()=>{ joursIn.disabled = autoChk.checked; recalc(); });
+  const motifIn = el('input',{type:'text'});
+  const obsIn = el('textarea',{style:'width:100%;min-height:60px;padding:8px;border:1px solid var(--rule);border-radius:8px'});
+  formCard.appendChild(el('div',{class:'grid grid-3'},
+    el('div',{class:'field'}, label('Type d\'absence'), typeSel),
+    el('div',{class:'field'}, label('Date début'), debutIn),
+    el('div',{class:'field'}, label('Date fin'), finIn)
+  ));
+  formCard.appendChild(el('div',{class:'grid grid-3', style:'margin-top:10px;align-items:end'},
+    el('div',{class:'field'}, label('Nombre de jours'), joursIn),
+    el('div',{class:'field'}, el('label',{style:'display:flex;align-items:center;gap:8px;text-transform:none;font-weight:500;margin-top:22px'}, autoChk, 'Calcul automatique (jours ouvrables)')),
+    el('div',{class:'field'}, label('Motif'), motifIn)
+  ));
+  formCard.appendChild(el('div',{class:'field', style:'margin-top:10px'}, label('Observations'), obsIn));
+  formCard.appendChild(el('div',{class:'btn-row', style:'margin-top:12px'}, el('button',{class:'btn gold', onClick:()=>{
+    if(!debutIn.value || !finIn.value){ alert('Merci de renseigner les dates de début et de fin.'); return; }
+    na.dateDebut = debutIn.value; na.dateFin = finIn.value; na.nbJours = parseFloat(joursIn.value)||0;
+    na.calculAuto = autoChk.checked; na.motif = motifIn.value; na.observations = obsIn.value;
+    na.historique = [{date:new Date().toISOString(), utilisateur: state.profile?.email||'inconnu', action:'Création', ancienneValeur:null, nouvelleValeur:na.nbJours+' j ('+na.typeCode+')', motif:na.motif}];
+    const list = getAbsencesSalarie(salarie.id); list.push(na); setAbsencesSalarie(salarie.id, list);
+    logActivity('Absence déclarée pour '+salarie.nom+' '+salarie.prenom+' : '+na.typeCode+' du '+na.dateDebut+' au '+na.dateFin+' ('+na.nbJours+' j)');
+    logAbsenceHistorique(salarie, 'Création', null, na.typeCode+' du '+na.dateDebut+' au '+na.dateFin+' ('+na.nbJours+' j)', na.motif);
+    render();
+  }}, '+ Enregistrer l\'absence')));
+  main.appendChild(formCard);
+
+  const listCard = el('div',{class:'card'}, el('h3',{},'Historique des absences'));
+  if(!absencesSalarie.length){
+    listCard.appendChild(el('div',{class:'empty'}, 'Aucune absence enregistrée pour ce salarié.'));
+  } else {
+    listCard.appendChild(el('table',{},
+      el('thead',{}, el('tr',{}, el('th',{},'Type'), el('th',{},'Du'), el('th',{},'Au'), el('th',{},'Jours'), el('th',{},'Statut'), el('th',{},'Motif'), el('th',{},''))),
+      el('tbody',{}, absencesSalarie.slice().reverse().map(a=>{
+        const typeInfo = paramsGTA.typesAbsence.find(t=>t.code===a.typeCode);
+        return el('tr',{},
+          el('td',{}, typeInfo?typeInfo.libelle:a.typeCode),
+          el('td',{}, a.dateDebut), el('td',{}, a.dateFin), el('td',{}, a.nbJours+' j'),
+          el('td',{}, el('span',{class:'tag'}, a.statut)),
+          el('td',{}, a.motif||'—'),
+          el('td',{style:'text-align:right'}, el('button',{class:'btn danger', style:'padding:5px 10px;font-size:11px', onClick:()=>{
+            if(!confirm('Supprimer cette absence ?')) return;
+            setAbsencesSalarie(salarie.id, getAbsencesSalarie(salarie.id).filter(x=>x.id!==a.id));
+            logActivity('Absence supprimée pour '+salarie.nom+' '+salarie.prenom+' : '+a.typeCode+' du '+a.dateDebut);
+            logAbsenceHistorique(salarie, 'Suppression', a.typeCode+' du '+a.dateDebut+' au '+a.dateFin+' ('+a.nbJours+' j)', null, 'Suppression manuelle');
+            render();
+          }}, 'Supprimer'))
+        );
+      }))
+    ));
+  }
+  main.appendChild(listCard);
 }
 function renderSaisie(main){
   main.appendChild(el('div',{class:'topbar'}, el('div',{}, el('h1',{},'Saisie & bulletin de paie'), el('div',{class:'subtitle'},'Renseignez les éléments variables du mois, le bulletin se calcule automatiquement.'))));
@@ -1800,6 +2249,27 @@ function ledRow(codeLabel, libelle, base, tauxSal, gains, retenue, tauxPat, patr
     el('div',{class:'num'}, patronal!==undefined && patronal!==null ? CFA(patronal) : '')
   );
 }
+function calculSituationCongesMois(salarie, moisIdx, annee){
+  const paramsGTA = state.paramsGTA;
+  const absences = getAbsencesSalarie(salarie.id);
+  const typesImpactants = new Set(paramsGTA.typesAbsence.filter(t=>t.impacteSolde).map(t=>t.code));
+  let joursPrisMois = 0, joursPrisAvant = 0;
+  absences.forEach(a=>{
+    if(!typesImpactants.has(a.typeCode) || a.statut==='annulé') return;
+    const dd = GTAEngine.parseFR(a.dateDebut);
+    if(!dd) return;
+    if(dd.getFullYear()===annee && dd.getMonth()===moisIdx) joursPrisMois += Number(a.nbJours)||0;
+    else if(dd.getFullYear()<annee || (dd.getFullYear()===annee && dd.getMonth()<moisIdx)) joursPrisAvant += Number(a.nbJours)||0;
+  });
+  const refDebut = new Date(annee,0,1);
+  const finMoisPrecedent = new Date(annee, moisIdx, 0);
+  const anc = anneesAncienneteA(salarie, finMoisPrecedent);
+  const acquisAvant = moisIdx===0 ? 0 : GTAEngine.calculAcquisitionAnnuelle(salarie.dateEntree, salarie.dateSortie, refDebut, finMoisPrecedent, paramsGTA, anc);
+  const soldePrecedent = Math.round(((salarie.gtaSoldeInitial||0) + acquisAvant - joursPrisAvant)*100)/100;
+  const acquisitionDuMois = paramsGTA.acquisitionMensuelle;
+  const soldeRestant = Math.round((soldePrecedent + acquisitionDuMois - joursPrisMois)*100)/100;
+  return { soldePrecedent, acquisitionDuMois, joursPris: joursPrisMois, soldeRestant };
+}
 function renderBulletinOnly(salarie, saisieRaw, arrondiPrec, moisIdx){
   if(state.compiledBulletinTemplate){
     try{
@@ -1864,6 +2334,21 @@ function renderBulletinOnly(salarie, saisieRaw, arrondiPrec, moisIdx){
     ledRow('031','TOTAL DES INDEMNITÉS',null,null,b.totalIndemnites,null,null,null,{total:true}),
     ledRow('033','SALAIRE NET 2',null,null,b.net2,null,null,null,{total:true}),
     el('div',{class:'led-row net'}, el('div',{}), el('div',{},'NET À PAYER'), el('div',{}), el('div',{}), el('div',{class:'num'}, CFA(b.netAPayer)), el('div',{}), el('div',{}), el('div',{})),
+    (()=>{
+      const sit = calculSituationCongesMois(salarie, moisIdx, ent.annee);
+      const indemniteCeMois = (Number(saisieRaw?.congesPayes)||0) > 0;
+      return el('div',{class:'conges-box'},
+        el('div',{class:'ct'}, 'Situation des congés'),
+        el('div',{class:'cr'}, el('span',{},'Solde précédent'), el('span',{}, sit.soldePrecedent+' j')),
+        el('div',{class:'cr'}, el('span',{},'Acquisition du mois'), el('span',{}, '+ '+sit.acquisitionDuMois+' j')),
+        el('div',{class:'cr'}, el('span',{},'Congés pris ce mois'), el('span',{}, '− '+sit.joursPris+' j')),
+        el('div',{class:'cr tot'}, el('span',{},'Solde restant'), el('span',{}, sit.soldeRestant+' j')),
+        indemniteCeMois ? el('div',{style:'margin-top:6px;padding-top:6px;border-top:1px dashed var(--rule)'},
+          el('div',{class:'cr'}, el('span',{},'Salaire de référence'), el('span',{}, CFA(b.gains.salaireBase))),
+          el('div',{class:'cr'}, el('span',{},'Montant de l\'indemnité versée'), el('span',{}, CFA(saisieRaw.congesPayes)))
+        ) : null
+      );
+    })(),
     el('div',{class:'bulletin-foot'},
       el('div',{}, 'Arrondi reporté au mois suivant : ', el('b',{}, CFA(b.arrondiDuMois))),
       el('div',{}, 'Coût total employeur : ', el('b',{}, CFA(b.coutTotalEmployeur)))
@@ -2002,6 +2487,23 @@ function renderRecap(main){
     )
   ));
 
+  // --- Déclaration DNS (IPRES/CSS) pré-remplie ---
+  const freqIpresCss = state.entreprise.frequenceIpresCss || 'mensuelle';
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Déclaration DNS — IPRES & CSS (formulaire officiel pré-rempli)'),
+    el('div',{class:'help', style:'margin-top:-8px;margin-bottom:12px'}, 'IPRES et CSS partagent la même déclaration (DNS). Ce fichier reprend exactement le modèle officiel, déjà rempli avec vos salariés — plus qu\'à vérifier avant dépôt. Fréquence actuelle : '+freqIpresCss+' (modifiable dans Paramètres).'),
+    (()=>{
+      if(freqIpresCss==='trimestrielle'){
+        const trimestres = [['T1 (Janv.-Mars)',[0,1,2]], ['T2 (Avr.-Juin)',[3,4,5]], ['T3 (Juil.-Sept.)',[6,7,8]], ['T4 (Oct.-Déc.)',[9,10,11]]];
+        const sel = el('select',{}, trimestres.map((t,i)=> el('option',{value:i}, t[0])));
+        const btn = el('button',{class:'btn gold', onClick:()=>{ exportDNS(trimestres[parseInt(sel.value)][1], state.entreprise.annee); }}, '⇩ Générer la DNS du trimestre (.xlsx)');
+        return el('div',{class:'select-row', style:'margin-bottom:0'}, el('div',{class:'field', style:'flex:1;max-width:220px'}, label('Trimestre'), sel), btn);
+      }
+      const sel = el('select',{}, MOIS_LABEL.map((lbl,i)=> el('option',{value:i, ...(i===0?{selected:'selected'}:{})}, lbl)));
+      const btn = el('button',{class:'btn gold', onClick:()=>{ exportDNS([parseInt(sel.value)], state.entreprise.annee); }}, '⇩ Générer la DNS du mois (.xlsx)');
+      return el('div',{class:'select-row', style:'margin-bottom:0'}, el('div',{class:'field', style:'flex:1;max-width:220px'}, label('Mois'), sel), btn);
+    })()
+  ));
+
   // --- Livre de paie ---
   const titreLivre = 'Livre de paie — salaires nets versés (par salarié, par mois)';
   const rowsLivre = [['Salarié', ...MOIS_LABEL, 'Total annuel'],
@@ -2062,6 +2564,107 @@ function renderRecap(main){
 }
 
 /* ---- Paramètres ---- */
+function renderGTAParamsCard(){
+  const g = state.paramsGTA;
+  const card = el('div',{class:'card'}, el('h3',{},'Temps et absences'),
+    el('div',{class:'help', style:'margin-top:-6px;margin-bottom:14px'}, 'Règles d\'acquisition des congés et types d\'absence — aucune valeur codée en dur, tout est modifiable ici.')
+  );
+  const gfield = (key,lbl,type='text',opts=null)=>{
+    const wr = el('div',{class:'field'}, label(lbl));
+    let input;
+    if(opts){ input = el('select',{}, opts.map(([v,l])=>el('option',{value:v,...(g[key]===v?{selected:'selected'}:{})},l))); }
+    else { input = el('input',{type, step:'any', value:g[key]!==undefined?g[key]:''}); }
+    input.addEventListener('input', e=>{ g[key] = type==='number'?parseFloat(e.target.value||0):e.target.value; save('paramsGTA', g); });
+    wr.appendChild(input); return wr;
+  };
+  card.appendChild(el('div',{class:'grid grid-3'},
+    gfield('acquisitionMensuelle','Acquisition mensuelle (jours)','number'),
+    gfield('joursOuvrablesParMois','Jours ouvrables par mois (indemnité)','number'),
+    gfield('modeArrondi','Mode d\'arrondi',null,[['aucun','Aucun'],['entier_superieur','Entier supérieur'],['entier_inferieur','Entier inférieur'],['demi_superieur','Demi supérieur']])
+  ));
+  card.appendChild(el('div',{class:'grid grid-3', style:'margin-top:10px'},
+    gfield('periodeAcquisition','Période d\'acquisition',null,[['anniversaire','Anniversaire (date d\'entrée)'],['civile','Civile (1er janvier)']]),
+    (()=>{
+      const wr = el('div',{class:'field'}, label('Week-end travaillé'));
+      const sel = el('select',{}, [['NON','Non'],['OUI','Oui']].map(([v,l])=> el('option',{value:v, ...((g.weekendTravaille?'OUI':'NON')===v?{selected:'selected'}:{})}, l)));
+      sel.addEventListener('change', e=>{ g.weekendTravaille = e.target.value==='OUI'; save('paramsGTA', g); });
+      wr.appendChild(sel); return wr;
+    })(),
+    (()=>{
+      const wr = el('div',{class:'field'}, label('Diviseur indemnité de congé'));
+      const inp = el('input',{type:'number', step:'any', value:g.formuleIndemnite.diviseur});
+      inp.addEventListener('input', e=>{ g.formuleIndemnite.diviseur = parseFloat(e.target.value||26); save('paramsGTA', g); });
+      wr.appendChild(inp); return wr;
+    })()
+  ));
+
+  card.appendChild(el('div',{class:'divider'}));
+  card.appendChild(el('h3',{style:'font-size:13px;margin-bottom:8px'}, 'Majoration selon l\'ancienneté'));
+  const majTable = el('div',{});
+  const renderMaj = ()=>{
+    majTable.innerHTML = '';
+    g.majorationAnciennete.forEach((p,i)=>{
+      const row = el('div',{class:'grid grid-3', style:'margin-bottom:6px;align-items:end'},
+        (()=>{ const w=el('div',{class:'field'},label(i===0?'Après (années)':''),el('input',{type:'number',value:p.anneesMin})); w.querySelector('input').addEventListener('input',e=>{p.anneesMin=parseFloat(e.target.value||0); save('paramsGTA',g);}); return w; })(),
+        (()=>{ const w=el('div',{class:'field'},label(i===0?'Jours supplémentaires':''),el('input',{type:'number',value:p.joursSupp})); w.querySelector('input').addEventListener('input',e=>{p.joursSupp=parseFloat(e.target.value||0); save('paramsGTA',g);}); return w; })(),
+        el('button',{class:'btn danger', style:'padding:8px 10px', onClick:()=>{ g.majorationAnciennete.splice(i,1); save('paramsGTA',g); renderMaj(); }}, '✕')
+      );
+      majTable.appendChild(row);
+    });
+  };
+  renderMaj();
+  card.appendChild(majTable);
+  card.appendChild(el('button',{class:'btn secondary', style:'margin-bottom:14px', onClick:()=>{ g.majorationAnciennete.push({anneesMin:0,joursSupp:0}); save('paramsGTA',g); renderMaj(); }}, '+ Ajouter un palier'));
+
+  card.appendChild(el('div',{class:'divider'}));
+  card.appendChild(el('h3',{style:'font-size:13px;margin-bottom:8px'}, 'Jours fériés / calendrier de l\'entreprise'));
+  const feriesTable = el('div',{});
+  const renderFeries = ()=>{
+    feriesTable.innerHTML = '';
+    g.joursFeries.forEach((d,i)=>{
+      const row = el('div',{style:'display:flex;gap:8px;margin-bottom:6px;align-items:center'},
+        el('input',{type:'text', value:d, placeholder:'jj/mm/aaaa', style:'flex:1'}),
+        el('button',{class:'btn danger', style:'padding:8px 10px', onClick:()=>{ g.joursFeries.splice(i,1); save('paramsGTA',g); renderFeries(); }}, '✕')
+      );
+      row.querySelector('input').addEventListener('input', e=>{ g.joursFeries[i]=e.target.value; save('paramsGTA',g); });
+      feriesTable.appendChild(row);
+    });
+  };
+  renderFeries();
+  card.appendChild(feriesTable);
+  card.appendChild(el('button',{class:'btn secondary', style:'margin-bottom:14px', onClick:()=>{ g.joursFeries.push(''); save('paramsGTA',g); renderFeries(); }}, '+ Ajouter un jour férié'));
+
+  card.appendChild(el('div',{class:'divider'}));
+  card.appendChild(el('h3',{style:'font-size:13px;margin-bottom:8px'}, 'Types d\'absence'));
+  card.appendChild(el('div',{class:'help', style:'margin-top:-4px;margin-bottom:10px'}, '« Impacte le solde » = décompté des congés payés. « Rémunéré » = maintien de salaire pendant l\'absence.'));
+  const typesTable = el('div',{});
+  const renderTypes = ()=>{
+    typesTable.innerHTML = '';
+    typesTable.appendChild(el('table',{},
+      el('thead',{}, el('tr',{}, el('th',{},'Code'), el('th',{},'Libellé'), el('th',{},'Impacte solde'), el('th',{},'Rémunéré'), el('th',{},''))),
+      el('tbody',{}, g.typesAbsence.map((t,i)=> el('tr',{},
+        el('td',{class:'mono'}, t.code),
+        el('td',{}, (()=>{ const inp=el('input',{type:'text',value:t.libelle,style:'width:100%'}); inp.addEventListener('input',e=>{t.libelle=e.target.value; save('paramsGTA',g);}); return inp; })()),
+        el('td',{}, (()=>{ const chk=el('input',{type:'checkbox',...(t.impacteSolde?{checked:'checked'}:{})}); chk.addEventListener('change',e=>{t.impacteSolde=e.target.checked; save('paramsGTA',g);}); return chk; })()),
+        el('td',{}, (()=>{ const chk=el('input',{type:'checkbox',...(t.remunere?{checked:'checked'}:{})}); chk.addEventListener('change',e=>{t.remunere=e.target.checked; save('paramsGTA',g);}); return chk; })()),
+        el('td',{style:'text-align:right'}, t.systeme ? el('span',{class:'help'},'—') : el('button',{class:'btn danger', style:'padding:4px 9px;font-size:11px', onClick:()=>{ g.typesAbsence.splice(i,1); save('paramsGTA',g); renderTypes(); }}, 'Supprimer'))
+      )))
+    ));
+  };
+  renderTypes();
+  card.appendChild(typesTable);
+  const newCode = el('input',{type:'text', placeholder:'Code (ex: CONG_SPE)', style:'max-width:180px'});
+  const newLbl = el('input',{type:'text', placeholder:'Libellé', style:'max-width:260px'});
+  card.appendChild(el('div',{class:'btn-row', style:'margin-top:10px'},
+    newCode, newLbl,
+    el('button',{class:'btn secondary', onClick:()=>{
+      if(!newCode.value.trim()||!newLbl.value.trim()){ alert('Code et libellé requis.'); return; }
+      g.typesAbsence.push({code:newCode.value.trim().toUpperCase(), libelle:newLbl.value.trim(), impacteSolde:false, remunere:true, presenceParticuliere:false, systeme:false});
+      save('paramsGTA', g); newCode.value=''; newLbl.value=''; renderTypes();
+    }}, '+ Ajouter un type personnalisé')
+  ));
+  return card;
+}
 function renderParams(main){
   main.appendChild(el('div',{class:'topbar'}, el('div',{}, el('h1',{},'Paramètres'), el('div',{class:'subtitle'},'Informations de l\'entreprise et barèmes légaux (IPRES, IRPP, TRIMF, CSS, CFCE)'))));
 
@@ -2079,6 +2682,23 @@ function renderParams(main){
   entCard.appendChild(el('div',{class:'grid grid-2'}, efield('raisonSociale','Raison sociale'), efield('annee','Année','number')));
   entCard.appendChild(el('div',{class:'grid grid-2',style:'margin-top:10px'}, efield('adresse','Adresse'), efield('convention','Convention collective')));
   entCard.appendChild(el('div',{class:'grid grid-3',style:'margin-top:10px'}, efield('telephone','Téléphone'), efield('fax','Fax'), efield('ninea','NINEA')));
+  entCard.appendChild(el('div',{class:'grid grid-2',style:'margin-top:10px'},
+    efield('numeroUniqueEmployeur','N° Unique Employeur (10 chiffres, pour la DNS IPRES/CSS)'),
+    (()=>{
+      const wr = el('div',{class:'field'}, label('Fréquence de déclaration VRS'));
+      const sel = el('select',{}, ['mensuelle','trimestrielle'].map(v=> el('option',{value:v, ...(ent.frequenceVRS===v?{selected:'selected'}:{})}, v.charAt(0).toUpperCase()+v.slice(1))));
+      sel.addEventListener('change', e=>{ ent.frequenceVRS = e.target.value; save('entreprise', ent); });
+      wr.appendChild(sel); return wr;
+    })()
+  ));
+  entCard.appendChild(el('div',{class:'grid grid-2',style:'margin-top:10px'},
+    (()=>{
+      const wr = el('div',{class:'field'}, label('Fréquence de déclaration IPRES / CSS (DNS)'));
+      const sel = el('select',{}, ['mensuelle','trimestrielle'].map(v=> el('option',{value:v, ...(ent.frequenceIpresCss===v?{selected:'selected'}:{})}, v.charAt(0).toUpperCase()+v.slice(1))));
+      sel.addEventListener('change', e=>{ ent.frequenceIpresCss = e.target.value; save('entreprise', ent); render(); });
+      wr.appendChild(sel); return wr;
+    })(), null
+  ));
   const logoInput = el('input',{type:'file', accept:'image/png,image/jpeg', style:'display:none'});
   logoInput.addEventListener('change', (e)=>{
     const file = e.target.files[0]; if(!file) return;
@@ -2095,6 +2715,7 @@ function renderParams(main){
   );
   entCard.appendChild(el('div',{class:'field', style:'margin-top:4px'}, label('Logo de l\'entreprise'), logoRow, el('div',{class:'help', style:'margin-top:6px'}, 'Affiché sur les bulletins de paie et les documents (attestation, certificat de travail).')));
   main.appendChild(entCard);
+  main.appendChild(renderGTAParamsCard());
 
   const backupCard = el('div',{class:'card'}, el('h3',{},'Sauvegarde'),
     el('div',{class:'help', style:'margin-top:-6px;margin-bottom:12px'}, 'Télécharge une copie complète de cette entreprise (salariés, saisies, paramètres) au format .json — à garder de côté avant toute manipulation importante, ou pour la recréer via « Importer une sauvegarde » sur l\'écran d\'accueil.'),
