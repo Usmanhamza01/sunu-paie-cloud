@@ -137,7 +137,7 @@ tr:hover td{background:var(--paper-dim);}
 .bulletin-id div span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);}
 .bulletin-id div b{font-size:13px;}
 .led-row{display:grid;grid-template-columns:36px 1fr 95px 60px 95px 95px 60px 105px;gap:0;padding:0;align-items:stretch;border-bottom:1px solid var(--rule);font-size:12.5px;}
-.led-row>div{padding:4.5px 8px;border-left:1px solid rgba(28,35,33,.08);display:flex;align-items:center;}
+.led-row>div{padding:4.5px 8px;border-left:1px solid rgba(28,35,33,.08);display:flex;align-items:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
 .led-row>div:first-child{border-left:none;padding-left:14px;padding-right:2px;}
 .led-row>div:nth-child(2){padding-left:6px;}
 .led-row>div:last-child{padding-right:20px;}
@@ -264,6 +264,8 @@ const DEFAULT_PARAMS_GTA = {
   joursFeries: [],                     // liste de dates 'jj/mm/aaaa' (calendrier de l'entreprise)
   majorationAnciennete: [ {anneesMin:15, joursSupp:1}, {anneesMin:20, joursSupp:2}, {anneesMin:25, joursSupp:3} ],
   formuleIndemnite: { diviseur:26, primesIncluses:[] }, // codes de gains de la saisie à inclure dans le salaire de référence
+  methodeCalculConge: 'report_brut', // 'report_brut' (méthode historique) | 'formule_jours' (solde en jours + indemnité = brut × jours/diviseur)
+  autoriserSoldeNegatif: false,
   typesAbsence: JSON.parse(JSON.stringify(DEFAULT_TYPES_ABSENCE))
 };
 
@@ -2124,21 +2126,32 @@ function renderAbsencesParSalarie(main){
       el('thead',{}, el('tr',{}, el('th',{},'Type'), el('th',{},'Du'), el('th',{},'Au'), el('th',{},'Jours'), el('th',{},'Statut'), el('th',{},'Motif'), el('th',{},''))),
       el('tbody',{}, absencesSalarie.slice().reverse().map(a=>{
         const typeInfo = paramsGTA.typesAbsence.find(t=>t.code===a.typeCode);
+        const dd = GTAEngine.parseFR(a.dateDebut), df = GTAEngine.parseFR(a.dateFin);
+        const memeMois = dd && df && dd.getFullYear()===df.getFullYear() && dd.getMonth()===df.getMonth();
+        const peutAppliquer = typeInfo && typeInfo.impacteSolde && memeMois;
         return el('tr',{},
           el('td',{}, typeInfo?typeInfo.libelle:a.typeCode),
           el('td',{}, a.dateDebut), el('td',{}, a.dateFin), el('td',{}, a.nbJours+' j'),
           el('td',{}, el('span',{class:'tag'}, a.statut)),
           el('td',{}, a.motif||'—'),
-          el('td',{style:'text-align:right'}, el('button',{class:'btn danger', style:'padding:5px 10px;font-size:11px', onClick:()=>{
-            if(!confirm('Supprimer cette absence ?')) return;
-            setAbsencesSalarie(salarie.id, getAbsencesSalarie(salarie.id).filter(x=>x.id!==a.id));
-            logActivity('Absence supprimée pour '+salarie.nom+' '+salarie.prenom+' : '+a.typeCode+' du '+a.dateDebut);
-            logAbsenceHistorique(salarie, 'Suppression', a.typeCode+' du '+a.dateDebut+' au '+a.dateFin+' ('+a.nbJours+' j)', null, 'Suppression manuelle');
-            render();
-          }}, 'Supprimer'))
+          el('td',{style:'text-align:right;white-space:nowrap'},
+            peutAppliquer ? el('button',{class:'btn secondary', style:'padding:5px 10px;font-size:11px;margin-right:6px', onClick:()=>{
+              appliquerCongeAuMois(salarie, dd.getMonth(), Number(a.nbJours));
+            }}, '→ Appliquer au bulletin') : null,
+            el('button',{class:'btn danger', style:'padding:5px 10px;font-size:11px', onClick:()=>{
+              if(!confirm('Supprimer cette absence ?')) return;
+              setAbsencesSalarie(salarie.id, getAbsencesSalarie(salarie.id).filter(x=>x.id!==a.id));
+              logActivity('Absence supprimée pour '+salarie.nom+' '+salarie.prenom+' : '+a.typeCode+' du '+a.dateDebut);
+              logAbsenceHistorique(salarie, 'Suppression', a.typeCode+' du '+a.dateDebut+' au '+a.dateFin+' ('+a.nbJours+' j)', null, 'Suppression manuelle');
+              render();
+            }}, 'Supprimer')
+          )
         );
       }))
     ));
+    if(absencesSalarie.some(a=>{ const t=paramsGTA.typesAbsence.find(x=>x.code===a.typeCode); const dd=GTAEngine.parseFR(a.dateDebut), df=GTAEngine.parseFR(a.dateFin); return t && t.impacteSolde && !(dd&&df&&dd.getMonth()===df.getMonth()&&dd.getFullYear()===df.getFullYear()); })){
+      listCard.appendChild(el('div',{class:'help', style:'margin-top:10px'}, 'Une ou plusieurs absences s\'étendent sur deux mois différents — le bouton « Appliquer au bulletin » n\'est proposé que pour les congés tenant sur un seul mois civil ; répartissez-les manuellement dans Saisie & bulletin le cas échéant.'));
+    }
   }
   main.appendChild(listCard);
 }
@@ -2185,16 +2198,7 @@ function renderSaisie(main){
       }
     }}, '↻ Reporter '+MOIS_LABEL[m-1]));
     form.appendChild(el('button',{class:'btn secondary', style:'width:100%;margin-bottom:14px;border-color:var(--gold);color:var(--pine-dark)', onClick:()=>{
-      const arrondiPrecPourMoisPrecedent = computeArrondiPrecedent(salarie, m-1);
-      const bMoisPrecedent = calcBulletin(salarie, getSaisie(salarie.id,m-1), arrondiPrecPourMoisPrecedent, state.params, m-1, state.entreprise.annee);
-      if(!confirm('Marquer '+MOIS_LABEL[m]+' comme mois de congé pour '+salarie.nom+' '+salarie.prenom+' ?\n\nLes gains habituels (salaire de base, sursalaire...) seront mis à 0, et le brut de '+MOIS_LABEL[m-1]+' ('+CFA(bMoisPrecedent.brut)+') sera reporté en « Congés payés ». Les retenues et cotisations se recalculeront automatiquement sur cette base.')) return;
-      const nouvelleSaisie = Object.assign(emptySaisie(), getSaisie(salarie.id,m));
-      nouvelleSaisie.salaireBase = 0; nouvelleSaisie.sursalaire = 0; nouvelleSaisie.heuresSup = 0; nouvelleSaisie.autreGain = 0;
-      nouvelleSaisie.autresIndemnites = 0; nouvelleSaisie.logement = 0; nouvelleSaisie.nourriture = 0; nouvelleSaisie.primeExceptionnelle = 0;
-      nouvelleSaisie.congesPayes = Math.round(bMoisPrecedent.brut);
-      setSaisie(salarie.id, m, nouvelleSaisie);
-      logActivity('Mois de congé activé pour '+salarie.nom+' '+salarie.prenom+' ('+MOIS_LABEL[m]+') — brut reporté : '+CFA(bMoisPrecedent.brut));
-      render();
+      appliquerCongeAuMois(salarie, m);
     }}, '🏖 Marquer '+MOIS_LABEL[m]+' comme mois de congé'));
   }
   const nf = (key,lbl)=>{
@@ -2248,6 +2252,56 @@ function ledRow(codeLabel, libelle, base, tauxSal, gains, retenue, tauxPat, patr
     el('div',{class:'num'}, tauxPat!==undefined && tauxPat!==null ? pct(tauxPat) : ''),
     el('div',{class:'num'}, patronal!==undefined && patronal!==null ? CFA(patronal) : '')
   );
+}
+/* Applique un mois de congé à la saisie d'un salarié, selon la méthode choisie dans les
+   paramètres (report du brut précédent, ou formule par jours). Utilisée à la fois par le
+   bouton de Saisie & bulletin et par le lien direct depuis Congés & absences. */
+function appliquerCongeAuMois(salarie, moisIdx, joursOverride){
+  if(moisIdx<=0){ alert('Impossible d\'appliquer un congé au premier mois de l\'année (aucun mois précédent de référence).'); return false; }
+  const methode = state.paramsGTA.methodeCalculConge || 'report_brut';
+  const arrondiPrecPourMoisPrecedent = computeArrondiPrecedent(salarie, moisIdx-1);
+  const bMoisPrecedent = calcBulletin(salarie, getSaisie(salarie.id,moisIdx-1), arrondiPrecPourMoisPrecedent, state.params, moisIdx-1, state.entreprise.annee);
+
+  if(methode === 'report_brut'){
+    if(!confirm('Marquer '+MOIS_LABEL[moisIdx]+' comme mois de congé pour '+salarie.nom+' '+salarie.prenom+' ?\n\nLes gains habituels (salaire de base, sursalaire...) seront mis à 0, et le brut de '+MOIS_LABEL[moisIdx-1]+' ('+CFA(bMoisPrecedent.brut)+') sera reporté en « Congés payés ». Les retenues et cotisations se recalculeront automatiquement sur cette base.')) return false;
+    const nouvelleSaisie = Object.assign(emptySaisie(), getSaisie(salarie.id,moisIdx));
+    nouvelleSaisie.salaireBase = 0; nouvelleSaisie.sursalaire = 0; nouvelleSaisie.heuresSup = 0; nouvelleSaisie.autreGain = 0;
+    nouvelleSaisie.autresIndemnites = 0; nouvelleSaisie.logement = 0; nouvelleSaisie.nourriture = 0; nouvelleSaisie.primeExceptionnelle = 0;
+    nouvelleSaisie.congesPayes = Math.round(bMoisPrecedent.brut);
+    setSaisie(salarie.id, moisIdx, nouvelleSaisie);
+    logActivity('Mois de congé activé pour '+salarie.nom+' '+salarie.prenom+' ('+MOIS_LABEL[moisIdx]+') — brut reporté : '+CFA(bMoisPrecedent.brut));
+    render();
+    return true;
+  }
+
+  // Méthode 'formule_jours' — cahier des charges "Bulletin de Congé"
+  let jours = joursOverride;
+  if(jours==null){
+    const sit = calculSituationCongesMois(salarie, moisIdx, state.entreprise.annee);
+    jours = sit.joursPris;
+  }
+  if(!jours || jours<=0){
+    alert('Aucun jour de congé n\'est déclaré pour '+MOIS_LABEL[moisIdx]+' dans l\'onglet Congés & absences. Déclarez d\'abord l\'absence (type « Congé annuel payé »), puis réessayez.');
+    return false;
+  }
+  const sit = calculSituationCongesMois(salarie, moisIdx, state.entreprise.annee);
+  const totalDisponible = Math.round((sit.soldePrecedent + sit.acquisitionDuMois)*100)/100;
+  if(totalDisponible < jours && !state.paramsGTA.autoriserSoldeNegatif){
+    if(!confirm('Attention : le solde disponible ('+totalDisponible+' j) est inférieur aux jours demandés ('+jours+' j). Le paramètre « autoriser un solde négatif » n\'est pas activé.\n\nContinuer quand même ?')) return false;
+  }
+  const salaireReference = bMoisPrecedent.gains.salaireBase || 0;
+  const diviseur = state.paramsGTA.formuleIndemnite.diviseur || 26;
+  const indemnite = GTAEngine.calculIndemniteConge(salaireReference, jours, state.paramsGTA.formuleIndemnite);
+  const detail = 'Salaire de référence : '+CFA(salaireReference)+'\nJours indemnisés : '+jours+' j\nDiviseur : '+diviseur+'\n\nIndemnité = '+CFA(salaireReference)+' × ('+jours+' ÷ '+diviseur+') = '+CFA(indemnite);
+  if(!confirm('Appliquer le congé de '+MOIS_LABEL[moisIdx]+' pour '+salarie.nom+' '+salarie.prenom+' ?\n\n'+detail)) return false;
+  const nouvelleSaisie = Object.assign(emptySaisie(), getSaisie(salarie.id,moisIdx));
+  nouvelleSaisie.salaireBase = 0; nouvelleSaisie.sursalaire = 0; nouvelleSaisie.heuresSup = 0; nouvelleSaisie.autreGain = 0;
+  nouvelleSaisie.autresIndemnites = 0; nouvelleSaisie.logement = 0; nouvelleSaisie.nourriture = 0; nouvelleSaisie.primeExceptionnelle = 0;
+  nouvelleSaisie.congesPayes = indemnite;
+  setSaisie(salarie.id, moisIdx, nouvelleSaisie);
+  logActivity('Congé (formule par jours) appliqué pour '+salarie.nom+' '+salarie.prenom+' ('+MOIS_LABEL[moisIdx]+') — '+jours+' j, indemnité '+CFA(indemnite));
+  render();
+  return true;
 }
 function calculSituationCongesMois(salarie, moisIdx, annee){
   const paramsGTA = state.paramsGTA;
@@ -2596,6 +2650,22 @@ function renderGTAParamsCard(){
       inp.addEventListener('input', e=>{ g.formuleIndemnite.diviseur = parseFloat(e.target.value||26); save('paramsGTA', g); });
       wr.appendChild(inp); return wr;
     })()
+  ));
+  card.appendChild(el('div',{class:'field', style:'margin-top:10px;max-width:520px'},
+    label('Méthode de calcul du bulletin de congé'),
+    (()=>{
+      const sel = el('select',{}, [
+        ['report_brut','Report du brut du mois précédent (méthode historique)'],
+        ['formule_jours','Formule par jours (solde en jours + indemnité = brut × jours ÷ diviseur)']
+      ].map(([v,l])=> el('option',{value:v, ...(g.methodeCalculConge===v?{selected:'selected'}:{})}, l)));
+      sel.addEventListener('change', e=>{ g.methodeCalculConge = e.target.value; save('paramsGTA', g); render(); });
+      return sel;
+    })(),
+    el('div',{class:'help', style:'margin-top:6px'}, 'La méthode « historique » reste active par défaut, aucune fiche existante n\'est affectée. La formule par jours s\'appuie sur les absences déclarées dans l\'onglet Congés & absences (nombre de jours réellement pris ce mois) et affiche le détail du calcul avant application.')
+  ));
+  card.appendChild(el('label',{style:'display:flex;align-items:center;gap:8px;text-transform:none;font-weight:500;margin-top:10px'},
+    (()=>{ const chk=el('input',{type:'checkbox',...(g.autoriserSoldeNegatif?{checked:'checked'}:{})}); chk.addEventListener('change',e=>{g.autoriserSoldeNegatif=e.target.checked; save('paramsGTA',g);}); return chk; })(),
+    'Autoriser exceptionnellement un solde de congés négatif (sinon, une confirmation est demandée si le solde est insuffisant)'
   ));
 
   card.appendChild(el('div',{class:'divider'}));
