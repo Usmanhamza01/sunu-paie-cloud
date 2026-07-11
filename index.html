@@ -496,6 +496,12 @@ async function signUp(email, password, nom, prenom, companyName, licenseKey){
 }
 async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
   try{
+    // Si un profil existe déjà pour ce compte (ex: nouvelle tentative après un souci
+    // précédent, ou comportement de Supabase qui réutilise la session sur un e-mail
+    // déjà inscrit), pas besoin d'en recréer un : on considère l'activation acquise.
+    const { data: existing } = await sb.from('profiles').select('id').eq('id', state.session.user.id).single();
+    if(existing) return { success:true, alreadyExisted:true };
+
     const { data: isFirst, error: rpcError } = await sb.rpc('is_first_activation', { p_license_key: licenseKey });
     if(rpcError) return { success:false, message: 'Erreur de vérification de la licence : '+rpcError.message+' (avez-vous bien exécuté le script SQL le plus récent dans Supabase ?)' };
     const { error } = await sb.from('profiles').insert({
@@ -503,7 +509,12 @@ async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
       license_key: licenseKey, company_name: companyName, edition: check.edition,
       expires_at: check.expiresAt, is_admin: !!isFirst
     });
-    if(error) return { success:false, message: 'Erreur lors de la création du profil : '+error.message };
+    if(error){
+      if(error.code === '23505' || /duplicate key/i.test(error.message||'')){
+        return { success:true, alreadyExisted:true }; // course avec une tentative precedente : pas grave
+      }
+      return { success:false, message: 'Erreur lors de la création du profil : '+error.message };
+    }
     return { success:true };
   }catch(e){
     return { success:false, message: 'Erreur inattendue : '+(e?.message||e) };
