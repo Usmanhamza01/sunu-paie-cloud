@@ -169,26 +169,26 @@ tr:hover td{background:var(--paper-dim);}
 
 @media print{
   *{ -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; color-adjust:exact !important; }
-  @page{ size:A4; margin:6mm; }
+  @page{ size:A4; margin:10mm; }
   body *{visibility:hidden;}
   #print-area, #print-area *{visibility:visible;}
   #print-area{position:absolute;top:0;left:0;width:100%;}
   .no-print{display:none !important;}
-  .bulletin{page-break-inside:avoid; border:1px solid #333; border-radius:0; font-size:10.5px; margin-bottom:0 !important;}
+  .bulletin{page-break-inside:avoid; border:1px solid #333; border-radius:0; font-size:13px; margin-bottom:0 !important;}
   .bulletin + .bulletin{page-break-before:always;}
-  .bulletin-head{padding:6px 12px;}
-  .bulletin-head .ent{font-size:12.5px;}
-  .bulletin-head .adr{font-size:9px;}
-  .bulletin-id{padding:4px 12px;grid-template-columns:repeat(6,1fr);gap:2px 8px;}
-  .bulletin-id div span{font-size:7px;}
-  .bulletin-id div b{font-size:9.5px;}
-  .led-row{font-size:9px;border-bottom:1px solid #ccc;line-height:1.1;}
-  .led-row>div{padding:0.5px 6px;border-left:1px solid #ddd;}
-  .led-row>div:first-child{padding-left:8px;padding-right:2px;}
-  .led-row>div:last-child{padding-right:9px;}
-  .led-row.head{font-size:7px;}
-  .led-row.net{font-size:10.5px;}
-  .bulletin-foot{padding:3px 12px;font-size:8.5px;}
+  .bulletin-head{padding:14px 20px;}
+  .bulletin-head .ent{font-size:16px;}
+  .bulletin-head .adr{font-size:11px;}
+  .bulletin-id{padding:10px 20px;grid-template-columns:repeat(4,1fr);gap:8px 16px;}
+  .bulletin-id div span{font-size:9px;}
+  .bulletin-id div b{font-size:12px;}
+  .led-row{font-size:11.5px;border-bottom:1px solid #ccc;line-height:1.35;}
+  .led-row>div{padding:4px 10px;border-left:1px solid #ddd;}
+  .led-row>div:first-child{padding-left:14px;padding-right:4px;}
+  .led-row>div:last-child{padding-right:14px;}
+  .led-row.head{font-size:9.5px;}
+  .led-row.net{font-size:13.5px;}
+  .bulletin-foot{padding:8px 20px;font-size:10.5px;}
 }
 @media (max-width:900px){
   #paie-root{flex-direction:column;}
@@ -1974,17 +1974,17 @@ function renderRecap(main){
 
   // --- Déclaration IPRES ---
   const titreIPRES = 'Déclaration IPRES (retraite) — par mois';
-  const rowsIPRES = [['Mois','IPRES RG (salarial)','IPRES RG (patronal)','IPRES RC (salarial)','IPRES RC (patronal)'],
-    ...totauxMois.map((t,i)=>[MOIS_LABEL[i], t.ipresRG, t.ipresRGpat, t.ipresRC, t.ipresRCpat]),
-    ['TOTAL ANNUEL', totalAnnee.ipresRG, totalAnnee.ipresRGpat, totalAnnee.ipresRC, totalAnnee.ipresRCpat]];
+  const rowsIPRES = [['Mois','IPRES RG (salarial)','IPRES RG (patronal)','IPRES RC (salarial)','IPRES RC (patronal)','Total'],
+    ...totauxMois.map((t,i)=>[MOIS_LABEL[i], t.ipresRG, t.ipresRGpat, t.ipresRC, t.ipresRCpat, t.ipresRG+t.ipresRGpat+t.ipresRC+t.ipresRCpat]),
+    ['TOTAL ANNUEL', totalAnnee.ipresRG, totalAnnee.ipresRGpat, totalAnnee.ipresRC, totalAnnee.ipresRCpat, totalAnnee.ipresRG+totalAnnee.ipresRGpat+totalAnnee.ipresRC+totalAnnee.ipresRCpat]];
   toutesLesTables.push({titre:titreIPRES, rows:rowsIPRES});
   main.appendChild(el('div',{class:'card'}, h3WithExport(titreIPRES, ()=>rowsIPRES),
-    el('table',{class:'recap-table'},
-      el('thead',{}, el('tr',{}, el('th',{},'Mois'), th_num('IPRES RG (salarial)'), th_num('IPRES RG (patronal)'), th_num('IPRES RC (salarial)'), th_num('IPRES RC (patronal)'))),
-      el('tbody',{}, totauxMois.map((t,i)=> el('tr',{}, el('td',{}, MOIS_LABEL[i]), td_num(CFA(t.ipresRG)), td_num(CFA(t.ipresRGpat)), td_num(CFA(t.ipresRC)), td_num(CFA(t.ipresRCpat)))),
-        el('tr',{style:'background:var(--gold-soft);font-weight:700'}, el('td',{},'TOTAL ANNUEL'), td_num(CFA(totalAnnee.ipresRG)), td_num(CFA(totalAnnee.ipresRGpat)), td_num(CFA(totalAnnee.ipresRC)), td_num(CFA(totalAnnee.ipresRCpat)))
+    el('div',{style:'overflow-x:auto'}, el('table',{class:'recap-table'},
+      el('thead',{}, el('tr',{}, el('th',{},'Mois'), th_num('IPRES RG (salarial)'), th_num('IPRES RG (patronal)'), th_num('IPRES RC (salarial)'), th_num('IPRES RC (patronal)'), th_num('Total'))),
+      el('tbody',{}, totauxMois.map((t,i)=> el('tr',{}, el('td',{}, MOIS_LABEL[i]), td_num(CFA(t.ipresRG)), td_num(CFA(t.ipresRGpat)), td_num(CFA(t.ipresRC)), td_num(CFA(t.ipresRCpat)), td_num(el('b',{},CFA(t.ipresRG+t.ipresRGpat+t.ipresRC+t.ipresRCpat))))),
+        el('tr',{style:'background:var(--gold-soft);font-weight:700'}, el('td',{},'TOTAL ANNUEL'), td_num(CFA(totalAnnee.ipresRG)), td_num(CFA(totalAnnee.ipresRGpat)), td_num(CFA(totalAnnee.ipresRC)), td_num(CFA(totalAnnee.ipresRCpat)), td_num(CFA(totalAnnee.ipresRG+totalAnnee.ipresRGpat+totalAnnee.ipresRC+totalAnnee.ipresRCpat)))
       )
-    )
+    ))
   ));
 
   // --- Déclaration CSS ---
