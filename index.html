@@ -538,7 +538,7 @@ const SEED_DATA = JSON.parse(`{"entreprise": {"raisonSociale": "PHARMACIE SICAP-
 const SUPABASE_URL = 'https://eoilitbbinrcvkpmjygl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvaWxpdGJiaW5yY3ZrcG1qeWdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM3MDUxNDksImV4cCI6MjA5OTI4MTE0OX0.qapfd_IyN_qsubmEmvCqsTl1cxUIWr0WmtIgZlUFhIM';
 
-const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, paramsGTA:null, salaries:[], saisies:{}, absences:{}, absencesHistorique:[], absencesVue:'salarie', arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'', authLoading:false, saveStatus:'ok', pendingSaveBlob:null, pendingSaveCompanyId:null };
+const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, paramsGTA:null, salaries:[], saisies:{}, absences:{}, absencesHistorique:[], absencesVue:'salarie', arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'', authLoading:false, saveStatus:'ok', pendingSaveBlob:null, pendingSaveCompanyId:null, refreshing:false, lastRefreshOk:false };
 
 /* ---- Chargement du client Supabase ---- */
 let _supabaseLibPromise = null;
@@ -711,6 +711,36 @@ async function openCompany(id){
   state.myPermissions = perms;
   openCompanyWithData(id, c?.data);
 }
+async function refreshCompanyData(){
+  if(!state.companyId || state.refreshing) return;
+  state.refreshing = true; state.lastRefreshOk = false; render();
+  try{
+    const { data:c, error } = await sb.from('companies').select('data').eq('id', state.companyId).single();
+    if(error) throw error;
+    const blob = c?.data;
+    state.entreprise = blob?.entreprise || Object.assign({},DEFAULT_ENTREPRISE);
+    state.params = blob?.params || JSON.parse(JSON.stringify(DEFAULT_PARAMS));
+    state.paramsGTA = blob?.paramsGTA || JSON.parse(JSON.stringify(DEFAULT_PARAMS_GTA));
+    state.salaries = blob?.salaries || [];
+    state.saisies = blob?.saisies || {};
+    state.absences = blob?.absences || {};
+    state.absencesHistorique = blob?.absencesHistorique || [];
+    state.arrondisInit = blob?.arrondisInit || {};
+    state.activityLog = blob?.activityLog || [];
+    state.compiledBulletinTemplate = null;
+    if(state.entreprise.bulletinTemplate) await recompileBulletinTemplate();
+    if(!state.salaries.some(s=>s.id===state.salarieSel)) state.salarieSel = state.salaries.length ? state.salaries[0].id : null;
+    state.myPermissions = await loadMyPermissions(state.companyId);
+    state.refreshing = false;
+    state.lastRefreshOk = true;
+    render();
+    setTimeout(()=>{ state.lastRefreshOk = false; render(); }, 2500);
+  }catch(e){
+    state.refreshing = false;
+    render();
+    alert('Impossible d\'actualiser : vérifiez votre connexion. ('+(e.message||e)+')');
+  }
+}
 async function loadMyPermissions(companyId){
   if(state.profile?.is_admin) return Object.assign({}, FULL_PERMISSIONS);
   try{
@@ -876,6 +906,7 @@ function renderInner(){
     can('params') ? navBtn('params','07','Paramètres') : null,
     el('div',{style:'flex:1'}),
     el('div',{style:'padding:10px 12px 2px 12px;font-size:11px;color:rgba(255,255,255,.55)'}, 'Connecté : '+(state.profile.email||'')+(state.profile.is_admin?' (admin)':'')),
+    el('button',{class:'nav-btn', onClick:refreshCompanyData, disabled:state.refreshing?'disabled':undefined}, el('span',{class:'nav-num'},'↻'), state.refreshing?'Actualisation…':(state.lastRefreshOk?'Actualisé ✓':'Actualiser')),
     installButton(),
     el('button',{class:'nav-btn', onClick:closeCompany}, el('span',{class:'nav-num'},'↩'), 'Changer d\'entreprise'),
     el('button',{class:'nav-btn', onClick:signOutUser}, el('span',{class:'nav-num'},'⏻'), 'Se déconnecter')
@@ -1298,12 +1329,51 @@ function renderDashboard(main){
     el('div',{}, el('h1',{},'Tableau de bord'), el('div',{class:'subtitle'}, state.entreprise.raisonSociale || 'Renseignez votre entreprise dans Paramètres', ' — Cumul de Janvier à '+MOIS_LABEL[m]+' ', state.entreprise.annee)),
     monthPicker()
   ));
+
+  const shortcuts = [];
+  if(can('create')) shortcuts.push(el('button',{class:'btn gold', onClick:()=>{ state.modal = ()=>openSalarieModal(null); render(); }}, '+ Ajouter un salarié'));
+  shortcuts.push(el('button',{class:'btn secondary', onClick:()=>{ state.tab='saisie'; render(); }}, 'Saisie du mois'));
+  shortcuts.push(el('button',{class:'btn secondary', onClick:()=>{ state.tab='bulletins'; render(); }}, 'Bulletins du mois'));
+  if(can('reports')||can('declarations')) shortcuts.push(el('button',{class:'btn secondary', onClick:()=>{ state.tab='recap'; render(); }}, 'Récapitulatif annuel'));
+  if(can('salaries')) shortcuts.push(el('button',{class:'btn secondary', onClick:()=>{ state.tab='absences'; render(); }}, 'Congés & absences'));
+  main.appendChild(el('div',{class:'btn-row no-print', style:'margin-bottom:18px'}, shortcuts));
+
   main.appendChild(el('div',{class:'kpi-row'},
     kpi(state.salaries.length,'Salariés actifs'),
     kpi(CFA(masseBrute),'Masse salariale brute (cumul)'),
     kpi(CFA(masseNet),'Net à payer (cumul)'),
     kpi(CFA(masseCoutEmployeur),'Coût total employeur (cumul)')
   ));
+
+  if(state.paramsGTA && state.salaries.length){
+    const aujourdHui = new Date();
+    let joursRestantsTotal = 0; const enCongeAujourdhui = []; const soldesNegatifs = [];
+    state.salaries.forEach(s=>{
+      const { solde, absencesSalarie } = calculSituationAnnuelle(s);
+      joursRestantsTotal += solde.soldeDisponible;
+      if(solde.soldeDisponible < 0) soldesNegatifs.push({nom:s.nom+' '+s.prenom, solde:solde.soldeDisponible});
+      absencesSalarie.forEach(a=>{
+        if(a.statut!=='validé') return;
+        const dd = GTAEngine.parseFR(a.dateDebut), df = GTAEngine.parseFR(a.dateFin);
+        if(dd && df && aujourdHui>=dd && aujourdHui<=df) enCongeAujourdhui.push(s.nom+' '+s.prenom);
+      });
+    });
+    main.appendChild(el('div',{class:'card', style:'cursor:pointer', onClick:()=>{ state.tab='absences'; state.absencesVue='dashboard'; render(); }},
+      el('h3',{},'Congés — vue d\'ensemble'),
+      el('div',{class:'kpi-row', style:'margin-top:8px'},
+        kpi(Math.round(joursRestantsTotal*100)/100+' j', 'Solde restant (toute l\'entreprise)'),
+        kpi(enCongeAujourdhui.length, 'Salarié(s) en congé aujourd\'hui')
+      ),
+      enCongeAujourdhui.length ? el('div',{class:'help', style:'margin-top:8px'}, 'En congé : '+enCongeAujourdhui.join(', ')) : null
+    ));
+    if(soldesNegatifs.length){
+      main.appendChild(el('div',{class:'card', style:'border-color:var(--red);cursor:pointer', onClick:()=>{ state.tab='absences'; state.absencesVue='rapports'; render(); }},
+        el('h3',{style:'color:var(--red)'}, '⚠ '+soldesNegatifs.length+' salarié(s) avec un solde de congés négatif'),
+        el('div',{class:'help', style:'margin-top:4px'}, soldesNegatifs.map(x=>x.nom+' ('+x.solde+' j)').join(', ')+' — à régulariser dès que possible (nouvelle acquisition ou correction du solde initial).')
+      ));
+    }
+  }
+
   const reminders = computeReminders(m, state.entreprise.annee);
   const peutValiderDash = state.paramsGTA && state.paramsGTA.workflowActif && (state.profile.is_admin || can('validations'));
   if(peutValiderDash){
@@ -1322,6 +1392,27 @@ function renderDashboard(main){
       )))
     ));
   }
+
+  if(state.salaries.length){
+    const chartCard = el('div',{class:'card'}, el('h3',{},'Évolution de la masse salariale — '+state.entreprise.annee));
+    const canvas = el('canvas',{width:400,height:220});
+    chartCard.appendChild(canvas);
+    main.appendChild(chartCard);
+    const parMois = Array(12).fill(0);
+    state.salaries.forEach(s=>{
+      const annee = anneeDeCalcul(s);
+      for(let i=0;i<=m;i++){ parMois[i] += annee[i].brut; }
+    });
+    ensureChartJS().then(()=>{
+      if(!canvas.getContext) return;
+      new Chart(canvas, {
+        type:'bar',
+        data:{ labels: MOIS_LABEL.slice(0,m+1).map(x=>x.slice(0,3)), datasets:[{ label:'Masse salariale brute', data: parMois.slice(0,m+1), backgroundColor:'#0E4A3B' }] },
+        options:{ plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true, ticks:{ callback:v=>CFA(v) } } } }
+      });
+    }).catch(e=>{ chartCard.appendChild(el('div',{class:'help'}, e.message)); });
+  }
+
   const card = el('div',{class:'card'}, el('h3',{},'Salaires du mois — '+MOIS_LABEL[m]));
   if(!state.salaries.length){
     card.appendChild(el('div',{class:'empty'}, el('h3',{},'Aucun salarié'), el('div',{},'Ajoutez vos salariés dans l\'onglet « Salariés » pour commencer.')));
