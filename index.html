@@ -143,9 +143,10 @@ tr:hover td{background:var(--paper-dim);}
 .led-row>div:last-child{padding-right:20px;}
 .led-row.head{background:var(--pine);color:var(--white);font-size:9.5px;text-transform:uppercase;letter-spacing:.03em;}
 .led-row.head>div{border-left-color:rgba(255,255,255,.15);}
-.led-row .code{font-family:'Inter',sans-serif;color:var(--ink-soft);font-size:9.5px;}
+.led-row .code{font-family:'Inter',sans-serif;color:var(--ink-soft);font-size:9.5px;justify-content:center;text-align:center;}
 .led-row.head .code{color:rgba(255,255,255,.6);}
 .led-row .num{justify-content:flex-end;text-align:right;font-family:'Inter',sans-serif;font-variant-numeric:tabular-nums;white-space:nowrap;}
+.led-row .num.taux{justify-content:center;text-align:center;}
 .led-row.total{background:var(--gold-soft);font-weight:700;border-top:1.5px solid var(--gold);border-bottom:1.5px solid var(--gold);}
 .led-row.net{background:var(--pine-dark);color:var(--white);font-weight:700;font-size:14px;}
 .led-row.net>div{border-left-color:rgba(255,255,255,.25);}
@@ -173,7 +174,7 @@ tr:hover td{background:var(--paper-dim);}
 
 @media print{
   *{ -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; color-adjust:exact !important; }
-  @page{ size:A4; margin:10mm; }
+  @page{ size:A4; margin:8mm; }
   body *{visibility:hidden;}
   #print-area, #print-area *{visibility:visible;}
   #print-area{position:absolute;top:0;left:0;width:100%;}
@@ -186,8 +187,8 @@ tr:hover td{background:var(--paper-dim);}
   .bulletin-id{padding:10px 20px;grid-template-columns:repeat(4,1fr);gap:8px 16px;}
   .bulletin-id div span{font-size:9px;}
   .bulletin-id div b{font-size:12px;}
-  .led-row{font-size:11.5px;border-bottom:1px solid #ccc;line-height:1.35;}
-  .led-row>div{padding:4px 10px;border-left:1px solid #ddd;}
+  .led-row{font-size:11.5px;border-bottom:1px solid #ccc;line-height:1.2;}
+  .led-row>div{padding:3px 10px;border-left:1px solid #ddd;}
   .led-row>div:first-child{padding-left:14px;padding-right:4px;}
   .led-row>div:last-child{padding-right:14px;}
   .led-row.head{font-size:9.5px;}
@@ -195,7 +196,7 @@ tr:hover td{background:var(--paper-dim);}
   .conges-box{margin:0 20px 10px;padding:9px 14px;font-size:11px;}
   .bulletin-foot{padding:8px 20px;font-size:10.5px;}
 }
-@media (max-width:900px){
+@media screen and (max-width:900px){
   #paie-root{flex-direction:column;}
   .nav{width:100%;flex-direction:row;overflow-x:auto;}
   .kpi-row{grid-template-columns:1fr 1fr;}
@@ -212,7 +213,6 @@ tr:hover td{background:var(--paper-dim);}
 
 const CFA = n => (Math.round((n||0)*100)/100).toLocaleString('fr-FR',{maximumFractionDigits:0}) + ' F';
 const num = n => (n===null||n===undefined||isNaN(n)) ? 0 : n;
-const MOIS = ['JANVIER','FEVRIER','MARS','AVRIL','MAI','JUIN','JUILLET','AOUT','SEPTEMBRE','OCTOBRE','NOVEMBRE','DECEMBRE'];
 const MOIS_LABEL = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
 const uid = () => 'id' + Math.random().toString(36).slice(2,10);
 
@@ -263,9 +263,10 @@ const DEFAULT_PARAMS_GTA = {
   weekendTravaille: false,             // si vrai, samedi/dimanche comptent comme jours ouvrables
   joursFeries: [],                     // liste de dates 'jj/mm/aaaa' (calendrier de l'entreprise)
   majorationAnciennete: [ {anneesMin:15, joursSupp:1}, {anneesMin:20, joursSupp:2}, {anneesMin:25, joursSupp:3} ],
-  formuleIndemnite: { diviseur:26, primesIncluses:[] }, // codes de gains de la saisie à inclure dans le salaire de référence
+  formuleIndemnite: { diviseur:26 }, // le salaire de référence utilisé est le salaire de base du mois précédent
   methodeCalculConge: 'report_brut', // 'report_brut' (méthode historique) | 'formule_jours' (solde en jours + indemnité = brut × jours/diviseur)
   autoriserSoldeNegatif: false,
+  workflowActif: false, // Cloud uniquement : en_attente -> validé_responsable -> validé, avec notification. Classique reste toujours en validation directe.
   typesAbsence: JSON.parse(JSON.stringify(DEFAULT_TYPES_ABSENCE))
 };
 
@@ -340,15 +341,17 @@ const GTAEngine = (function(){
   // Solde de congés d'un salarié à une date donnée, à partir de son historique d'absences
   function calculSolde(soldeInitial, acquisitionAnnuelle, absencesDuSalarie, typesAbsence){
     const typesImpactants = new Set((typesAbsence||[]).filter(t=>t.impacteSolde).map(t=>t.code));
-    let joursPris = 0, joursAnnules = 0, joursReportes = 0;
+    let joursPris = 0, joursAnnules = 0, joursReportes = 0, joursEnAttente = 0;
     (absencesDuSalarie||[]).forEach(a=>{
       if(!typesImpactants.has(a.typeCode)) return;
       if(a.statut === 'annulé') joursAnnules += Number(a.nbJours)||0;
       else if(a.statut === 'reporté') joursReportes += Number(a.nbJours)||0;
-      else joursPris += Number(a.nbJours)||0;
+      else if(a.statut === 'en_attente' || a.statut === 'validé_responsable') joursEnAttente += Number(a.nbJours)||0;
+      else if(a.statut === 'refusé') { /* ne compte pas dans le solde */ }
+      else joursPris += Number(a.nbJours)||0; // 'validé'
     });
     const soldeDisponible = (Number(soldeInitial)||0) + (Number(acquisitionAnnuelle)||0) - joursPris + joursReportes;
-    return { soldeInitial:Number(soldeInitial)||0, acquisitionAnnuelle:Number(acquisitionAnnuelle)||0, joursPris, joursAnnules, joursReportes, soldeDisponible: Math.round(soldeDisponible*100)/100 };
+    return { soldeInitial:Number(soldeInitial)||0, acquisitionAnnuelle:Number(acquisitionAnnuelle)||0, joursPris, joursAnnules, joursReportes, joursEnAttente, soldeDisponible: Math.round(soldeDisponible*100)/100 };
   }
   // Indemnité de congé = salaire de référence × (nombre de jours ÷ diviseur paramétrable, 26 par défaut)
   function calculIndemniteConge(salaireReference, nbJours, formuleIndemnite){
@@ -676,8 +679,8 @@ async function signOutUser(){
 async function loadAll(){
   await initAuth();
 }
-const FULL_PERMISSIONS = {view:true,create:true,edit:true,delete:true,export:true,print:true,params:true,salaries:true,declarations:true,reports:true,manage_users:true};
-const DEFAULT_PERMISSIONS = {view:true,create:false,edit:false,delete:false,export:false,print:true,params:false,salaries:false,declarations:false,reports:false,manage_users:false};
+const FULL_PERMISSIONS = {view:true,create:true,edit:true,delete:true,export:true,print:true,params:true,salaries:true,declarations:true,reports:true,manage_users:true,validations:true};
+const DEFAULT_PERMISSIONS = {view:true,create:false,edit:false,delete:false,export:false,print:true,params:false,salaries:false,declarations:false,reports:false,manage_users:false,validations:false};
 async function openCompany(id){
   const [{data:c}, perms] = await Promise.all([
     sb.from('companies').select('data').eq('id', id).single(),
@@ -1205,6 +1208,16 @@ function renderDashboard(main){
     kpi(CFA(masseCoutEmployeur),'Coût total employeur (cumul)')
   ));
   const reminders = computeReminders(m, state.entreprise.annee);
+  const peutValiderDash = state.paramsGTA && state.paramsGTA.workflowActif && (state.profile.is_admin || can('validations'));
+  if(peutValiderDash){
+    const enAttenteDash = getAbsencesEnAttenteToutes();
+    if(enAttenteDash.length){
+      main.appendChild(el('div',{class:'card', style:'border-color:var(--gold);cursor:pointer', onClick:()=>{ state.tab='absences'; state.absencesVue='validations'; render(); }},
+        el('h3',{}, '🔔 '+enAttenteDash.length+' congé(s) en attente de votre validation'),
+        el('div',{class:'help'}, 'Cliquez ici pour les examiner dans Congés & absences → Validations.')
+      ));
+    }
+  }
   if(reminders.length){
     main.appendChild(el('div',{class:'card', style:'border-color:var(--gold)'}, el('h3',{},'⚠ À ne pas oublier ce mois-ci'),
       el('div',{}, reminders.map(r=> el('div',{style:'padding:7px 0;border-bottom:1px solid var(--paper-dim);font-size:13px'},
@@ -1605,7 +1618,8 @@ const PERMISSION_LABELS = [
   ['view','Voir l\'entreprise'], ['salaries','Accéder aux salariés'], ['create','Créer des salariés'],
   ['edit','Modifier (salariés, saisies)'], ['delete','Supprimer des salariés'],
   ['export','Exporter (Excel, sauvegardes)'], ['print','Imprimer / PDF'],
-  ['declarations','Déclarations & journal SAGE'], ['reports','Récapitulatif & rapports'], ['params','Paramètres de l\'entreprise']
+  ['declarations','Déclarations & journal SAGE'], ['reports','Récapitulatif & rapports'], ['params','Paramètres de l\'entreprise'],
+  ['validations','Valider les congés (responsable/direction)']
 ];
 function renderBulletinTemplateCard(){
   const ent = state.entreprise;
@@ -1911,14 +1925,77 @@ function renderAbsences(main){
   main.appendChild(el('div',{class:'topbar'}, el('div',{}, el('h1',{},'Congés & absences'), el('div',{class:'subtitle'},'Suivi du solde de congés, saisie des absences et rapports, conforme au Code du travail sénégalais.'))));
   const vue = state.absencesVue || 'salarie';
   const tabBtn = (v,l)=> el('button',{class: v===vue?'btn gold':'btn secondary', style:'margin-right:8px', onClick:()=>{ state.absencesVue=v; render(); }}, l);
-  main.appendChild(el('div',{class:'btn-row no-print', style:'margin-bottom:18px'}, tabBtn('salarie','Par salarié'), tabBtn('dashboard','Tableau de bord'), tabBtn('rapports','Rapports')));
+  const peutValider = state.paramsGTA && state.paramsGTA.workflowActif && (state.profile.is_admin || can('validations'));
+  const enAttenteCount = peutValider ? getAbsencesEnAttenteToutes().length : 0;
+  main.appendChild(el('div',{class:'btn-row no-print', style:'margin-bottom:18px'},
+    tabBtn('salarie','Par salarié'), tabBtn('dashboard','Tableau de bord'), tabBtn('rapports','Rapports'),
+    peutValider ? tabBtn('validations', 'Validations'+(enAttenteCount?' ('+enAttenteCount+')':'')) : null
+  ));
   if(!state.salaries.length){
     main.appendChild(el('div',{class:'card'}, el('div',{class:'empty'}, el('h3',{},'Aucun salarié'), el('div',{},'Ajoutez d\'abord un salarié dans l\'onglet « Salariés ».'))));
     return;
   }
   if(vue==='dashboard') renderAbsencesDashboard(main);
   else if(vue==='rapports') renderAbsencesRapports(main);
+  else if(vue==='validations' && peutValider) renderAbsencesValidations(main);
   else renderAbsencesParSalarie(main);
+}
+function getAbsencesEnAttenteToutes(){
+  const liste = [];
+  state.salaries.forEach(s=>{
+    getAbsencesSalarie(s.id).forEach(a=>{
+      if(a.statut==='en_attente' || a.statut==='validé_responsable') liste.push({salarie:s, absence:a});
+    });
+  });
+  return liste;
+}
+function renderAbsencesValidations(main){
+  const enAttente = getAbsencesEnAttenteToutes();
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Congés en attente de validation'),
+    el('div',{class:'help', style:'margin-top:-8px;margin-bottom:12px'}, 'Ces congés ne sont ni décomptés du solde ni intégrés au bulletin tant qu\'ils ne sont pas validés.'),
+    !enAttente.length ? el('div',{class:'empty'}, 'Aucun congé en attente de validation.') :
+    el('table',{},
+      el('thead',{}, el('tr',{}, el('th',{},'Salarié'), el('th',{},'Type'), el('th',{},'Du'), el('th',{},'Au'), el('th',{},'Jours'), el('th',{},'Statut'), el('th',{},''))),
+      el('tbody',{}, enAttente.map(({salarie,absence:a})=>{
+        const typeInfo = state.paramsGTA.typesAbsence.find(t=>t.code===a.typeCode);
+        return el('tr',{},
+          el('td',{}, salarie.nom+' '+salarie.prenom), el('td',{}, typeInfo?typeInfo.libelle:a.typeCode),
+          el('td',{}, a.dateDebut), el('td',{}, a.dateFin), el('td',{}, a.nbJours+' j'),
+          el('td',{}, el('span',{class:'badge-warn'}, a.statut==='en_attente'?'En attente (responsable)':'En attente (direction)')),
+          el('td',{style:'text-align:right;white-space:nowrap'},
+            el('button',{class:'btn gold', style:'padding:5px 10px;font-size:11px;margin-right:6px', onClick:()=>{
+              const list = getAbsencesSalarie(salarie.id);
+              const idx = list.findIndex(x=>x.id===a.id);
+              if(idx<0) return;
+              const etapeSuivante = a.statut==='en_attente' ? 'validé_responsable' : 'validé';
+              list[idx].statut = etapeSuivante;
+              (list[idx].historique = list[idx].historique||[]).push({date:new Date().toISOString(), utilisateur:state.profile?.email||'inconnu', action:'Validation', ancienneValeur:a.statut, nouvelleValeur:etapeSuivante, motif:''});
+              setAbsencesSalarie(salarie.id, list);
+              logActivity('Congé validé ('+etapeSuivante+') pour '+salarie.nom+' '+salarie.prenom+' : '+a.typeCode+' du '+a.dateDebut);
+              logAbsenceHistorique(salarie, 'Validation → '+etapeSuivante, a.statut, etapeSuivante, '');
+              render();
+            }}, etapeSuivanteLabel(a.statut)),
+            el('button',{class:'btn danger', style:'padding:5px 10px;font-size:11px', onClick:()=>{
+              const motif = prompt('Motif du refus (obligatoire) :');
+              if(!motif){ return; }
+              const list = getAbsencesSalarie(salarie.id);
+              const idx = list.findIndex(x=>x.id===a.id);
+              if(idx<0) return;
+              list[idx].statut = 'refusé';
+              (list[idx].historique = list[idx].historique||[]).push({date:new Date().toISOString(), utilisateur:state.profile?.email||'inconnu', action:'Refus', ancienneValeur:a.statut, nouvelleValeur:'refusé', motif});
+              setAbsencesSalarie(salarie.id, list);
+              logActivity('Congé refusé pour '+salarie.nom+' '+salarie.prenom+' : '+a.typeCode+' du '+a.dateDebut+' — motif : '+motif);
+              logAbsenceHistorique(salarie, 'Refus', a.statut, 'refusé', motif);
+              render();
+            }}, 'Refuser')
+          )
+        );
+      }))
+    )
+  ));
+}
+function etapeSuivanteLabel(statutActuel){
+  return statutActuel==='en_attente' ? 'Valider (responsable)' : 'Valider (direction)';
 }
 function calculSituationAnnuelle(salarie){
   const paramsGTA = state.paramsGTA;
@@ -2108,11 +2185,29 @@ function renderAbsencesParSalarie(main){
   formCard.appendChild(el('div',{class:'field', style:'margin-top:10px'}, label('Observations'), obsIn));
   formCard.appendChild(el('div',{class:'btn-row', style:'margin-top:12px'}, el('button',{class:'btn gold', onClick:()=>{
     if(!debutIn.value || !finIn.value){ alert('Merci de renseigner les dates de début et de fin.'); return; }
-    na.dateDebut = debutIn.value; na.dateFin = finIn.value; na.nbJours = parseFloat(joursIn.value)||0;
+    const dd = GTAEngine.parseFR(debutIn.value), df = GTAEngine.parseFR(finIn.value);
+    if(!dd || !df){ alert('Dates invalides — utilisez le format jj/mm/aaaa.'); return; }
+    if(df < dd){ alert('La date de fin doit être postérieure ou égale à la date de début.'); return; }
+    const chevauchement = absencesSalarie.some(a=>{
+      if(a.statut==='annulé'||a.statut==='refusé') return false;
+      const add = GTAEngine.parseFR(a.dateDebut), adf = GTAEngine.parseFR(a.dateFin);
+      return add && adf && dd<=adf && df>=add;
+    });
+    if(chevauchement && !confirm('Cette période chevauche une autre absence déjà enregistrée pour ce salarié. Continuer quand même ?')) return;
+    const nbJoursSaisis = parseFloat(joursIn.value)||0;
+    const typeChoisi = paramsGTA.typesAbsence.find(t=>t.code===na.typeCode);
+    if(typeChoisi && typeChoisi.impacteSolde){
+      const totalDisponible = solde.soldeDisponible;
+      if(nbJoursSaisis > totalDisponible && !paramsGTA.autoriserSoldeNegatif){
+        if(!confirm('Le solde disponible ('+totalDisponible+' j) est inférieur aux jours demandés ('+nbJoursSaisis+' j). Continuer quand même ?')) return;
+      }
+    }
+    na.dateDebut = debutIn.value; na.dateFin = finIn.value; na.nbJours = nbJoursSaisis;
     na.calculAuto = autoChk.checked; na.motif = motifIn.value; na.observations = obsIn.value;
-    na.historique = [{date:new Date().toISOString(), utilisateur: state.profile?.email||'inconnu', action:'Création', ancienneValeur:null, nouvelleValeur:na.nbJours+' j ('+na.typeCode+')', motif:na.motif}];
+    na.statut = paramsGTA.workflowActif ? 'en_attente' : 'validé';
+    na.historique = [{date:new Date().toISOString(), utilisateur: state.profile?.email||'inconnu', action:'Création', ancienneValeur:null, nouvelleValeur:na.nbJours+' j ('+na.typeCode+') — '+na.statut, motif:na.motif}];
     const list = getAbsencesSalarie(salarie.id); list.push(na); setAbsencesSalarie(salarie.id, list);
-    logActivity('Absence déclarée pour '+salarie.nom+' '+salarie.prenom+' : '+na.typeCode+' du '+na.dateDebut+' au '+na.dateFin+' ('+na.nbJours+' j)');
+    logActivity('Absence déclarée pour '+salarie.nom+' '+salarie.prenom+' : '+na.typeCode+' du '+na.dateDebut+' au '+na.dateFin+' ('+na.nbJours+' j)'+(paramsGTA.workflowActif?' — en attente de validation':''));
     logAbsenceHistorique(salarie, 'Création', null, na.typeCode+' du '+na.dateDebut+' au '+na.dateFin+' ('+na.nbJours+' j)', na.motif);
     render();
   }}, '+ Enregistrer l\'absence')));
@@ -2246,10 +2341,10 @@ function ledRow(codeLabel, libelle, base, tauxSal, gains, retenue, tauxPat, patr
     el('div',{class:'code'}, codeLabel),
     el('div',{}, libelle),
     el('div',{class:'num'}, base!==undefined && base!==null ? CFA(base) : ''),
-    el('div',{class:'num'}, tauxSal!==undefined && tauxSal!==null ? pct(tauxSal) : ''),
+    el('div',{class:'num taux'}, tauxSal!==undefined && tauxSal!==null ? pct(tauxSal) : ''),
     el('div',{class:'num'}, gains!==undefined && gains!==null ? CFA(gains) : ''),
     el('div',{class:'num'}, retenue!==undefined && retenue!==null ? CFA(retenue) : ''),
-    el('div',{class:'num'}, tauxPat!==undefined && tauxPat!==null ? pct(tauxPat) : ''),
+    el('div',{class:'num taux'}, tauxPat!==undefined && tauxPat!==null ? pct(tauxPat) : ''),
     el('div',{class:'num'}, patronal!==undefined && patronal!==null ? CFA(patronal) : '')
   );
 }
@@ -2309,7 +2404,7 @@ function calculSituationCongesMois(salarie, moisIdx, annee){
   const typesImpactants = new Set(paramsGTA.typesAbsence.filter(t=>t.impacteSolde).map(t=>t.code));
   let joursPrisMois = 0, joursPrisAvant = 0;
   absences.forEach(a=>{
-    if(!typesImpactants.has(a.typeCode) || a.statut==='annulé') return;
+    if(!typesImpactants.has(a.typeCode) || a.statut==='annulé' || a.statut==='refusé' || a.statut==='en_attente' || a.statut==='validé_responsable') return;
     const dd = GTAEngine.parseFR(a.dateDebut);
     if(!dd) return;
     if(dd.getFullYear()===annee && dd.getMonth()===moisIdx) joursPrisMois += Number(a.nbJours)||0;
@@ -2356,7 +2451,7 @@ function renderBulletinOnly(salarie, saisieRaw, arrondiPrec, moisIdx){
       idBox('Convention collective', ent.convention||'—'), idBox('Période de paie', MOIS_LABEL[moisIdx]+' '+(ent.annee||'')),
       idBox('NINEA', ent.ninea||'—'), idBox('Téléphone', ent.telephone||'—')
     ),
-    el('div',{class:'led-row head'}, el('div',{},'Code'), el('div',{},'Libellé'), el('div',{class:'num'},'Base'), el('div',{class:'num'},'Taux'), el('div',{class:'num'},'Gains'), el('div',{class:'num'},'Retenues'), el('div',{class:'num'},'Tx pat.'), el('div',{class:'num'},'Montant pat.')),
+    el('div',{class:'led-row head'}, el('div',{class:'code'},'Code'), el('div',{},'Libellé'), el('div',{class:'num'},'Base'), el('div',{class:'num taux'},'Taux'), el('div',{class:'num'},'Gains'), el('div',{class:'num'},'Retenues'), el('div',{class:'num taux'},'Tx pat.'), el('div',{class:'num'},'Montant pat.')),
     ledRow('001','Salaire de base',null,null,b.gains.salaireBase),
     ledRow('002','Sursalaire',null,null,b.gains.sursalaire),
     ledRow('003','Heures supplémentaires',null,null,b.gains.heuresSup),
@@ -2667,6 +2762,13 @@ function renderGTAParamsCard(){
     (()=>{ const chk=el('input',{type:'checkbox',...(g.autoriserSoldeNegatif?{checked:'checked'}:{})}); chk.addEventListener('change',e=>{g.autoriserSoldeNegatif=e.target.checked; save('paramsGTA',g);}); return chk; })(),
     'Autoriser exceptionnellement un solde de congés négatif (sinon, une confirmation est demandée si le solde est insuffisant)'
   ));
+  card.appendChild(el('div',{class:'divider'}));
+  card.appendChild(el('h3',{style:'font-size:13px;margin-bottom:8px'}, 'Circuit de validation'));
+  card.appendChild(el('label',{style:'display:flex;align-items:center;gap:8px;text-transform:none;font-weight:500'},
+    (()=>{ const chk=el('input',{type:'checkbox',...(g.workflowActif?{checked:'checked'}:{})}); chk.addEventListener('change',e=>{g.workflowActif=e.target.checked; save('paramsGTA',g); render();}); return chk; })(),
+    'Activer le circuit de validation des congés (les nouvelles absences restent « en attente » jusqu\'à validation par une personne autorisée, avant d\'être prises en compte dans le solde et le bulletin)'
+  ));
+  card.appendChild(el('div',{class:'help', style:'margin-top:6px'}, 'Désactivé : les congés sont pris en compte immédiatement (comportement historique). Le droit « Valider les congés » se gère par utilisateur dans « Gérer les accès à cette entreprise ».'));
 
   card.appendChild(el('div',{class:'divider'}));
   card.appendChild(el('h3',{style:'font-size:13px;margin-bottom:8px'}, 'Majoration selon l\'ancienneté'));
