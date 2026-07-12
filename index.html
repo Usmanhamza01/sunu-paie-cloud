@@ -538,7 +538,7 @@ const SEED_DATA = JSON.parse(`{"entreprise": {"raisonSociale": "PHARMACIE SICAP-
 const SUPABASE_URL = 'https://eoilitbbinrcvkpmjygl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVvaWxpdGJiaW5yY3ZrcG1qeWdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM3MDUxNDksImV4cCI6MjA5OTI4MTE0OX0.qapfd_IyN_qsubmEmvCqsTl1cxUIWr0WmtIgZlUFhIM';
 
-const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, paramsGTA:null, salaries:[], saisies:{}, absences:{}, absencesHistorique:[], absencesVue:'salarie', arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'' };
+const state = { session:null, profile:null, myPermissions:null, companyId:null, companies:[], entreprise:DEFAULT_ENTREPRISE, params:DEFAULT_PARAMS, paramsGTA:null, salaries:[], saisies:{}, absences:{}, absencesHistorique:[], absencesVue:'salarie', arrondisInit:{}, activityLog:[], compiledBulletinTemplate:null, tab:'dashboard', moisIdx:0, salarieSel:null, salarieFilter:'', loading:true, modal:null, authScreen:'login', authError:'', authLoading:false, saveStatus:'ok', pendingSaveBlob:null, pendingSaveCompanyId:null };
 
 /* ---- Chargement du client Supabase ---- */
 let _supabaseLibPromise = null;
@@ -617,19 +617,21 @@ async function signUp(email, password, nom, prenom, companyName, licenseKey){
   state.authError = '';
   const check = await verifyLicenseKey(companyName, licenseKey);
   if(!check.valid){ state.authError = check.message; render(); return; }
-  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; render(); return; }
+  state.authLoading = true; render();
+  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; state.authLoading=false; render(); return; }
   if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const { data, error } = await sb.auth.signUp({ email, password });
-  if(error){ state.authError = error.message; render(); return; }
+  if(error){ state.authError = error.message; state.authLoading=false; render(); return; }
   if(!data.session){
     state.authError = 'Compte créé. Si une confirmation par e-mail est requise, vérifiez votre boîte de réception puis reconnectez-vous.';
-    state.authScreen = 'login';
+    state.authScreen = 'login'; state.authLoading=false;
     render(); return;
   }
   state.session = data.session;
   const result = await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
-  if(!result.success){ state.authError = result.message; render(); return; }
+  if(!result.success){ state.authError = result.message; state.authLoading=false; render(); return; }
   await loadProfileAndCompanies();
+  state.authLoading = false;
   render();
 }
 async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
@@ -659,14 +661,33 @@ async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
   }
 }
 async function signIn(email, password){
-  state.authError = '';
-  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; render(); return; }
+  state.authError = ''; state.authLoading = true; render();
+  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; state.authLoading=false; render(); return; }
   if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
-  if(error){ state.authError = 'Identifiant ou mot de passe incorrect.'; render(); return; }
+  if(error){ state.authError = 'Identifiant ou mot de passe incorrect.'; state.authLoading=false; render(); return; }
   state.session = data.session;
   await loadProfileAndCompanies();
+  state.authLoading = false;
   render();
+}
+async function requestPasswordReset(email){
+  state.authError = ''; state.authLoading = true; render();
+  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; state.authLoading=false; render(); return; }
+  if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + window.location.pathname });
+  state.authLoading = false;
+  if(error){ state.authError = 'Erreur : '+error.message; render(); return; }
+  state.authError = '';
+  state.authScreen = 'login';
+  alert('Si un compte existe avec cette adresse, un e-mail vient de vous être envoyé avec un lien pour choisir un nouveau mot de passe. Pensez à vérifier vos courriers indésirables.');
+  render();
+}
+async function changeMyPassword(nouveauMotDePasse){
+  if(!sb) return { success:false, message:'Non connecté.' };
+  const { error } = await sb.auth.updateUser({ password: nouveauMotDePasse });
+  if(error) return { success:false, message: error.message };
+  return { success:true };
 }
 async function signOutUser(){
   if(sb) try{ await sb.auth.signOut(); }catch(e){}
@@ -737,7 +758,36 @@ async function deleteCompany(id){
 async function save(key, value){
   if(!state.companyId) return;
   const blob = { entreprise: state.entreprise, params: state.params, paramsGTA: state.paramsGTA, salaries: state.salaries, saisies: state.saisies, absences: state.absences, absencesHistorique: state.absencesHistorique, arrondisInit: state.arrondisInit, activityLog: state.activityLog };
-  await sb.from('companies').update({ data: blob, updated_at: new Date().toISOString() }).eq('id', state.companyId);
+  state.pendingSaveBlob = blob; // conserve la derniere version en attente, meme si l'enregistrement echoue
+  state.pendingSaveCompanyId = state.companyId;
+  try{
+    const { error } = await sb.from('companies').update({ data: blob, updated_at: new Date().toISOString() }).eq('id', state.companyId);
+    if(error) throw error;
+    state.pendingSaveBlob = null;
+    if(state.saveStatus !== 'ok'){ state.saveStatus = 'ok'; render(); }
+  }catch(e){
+    console.error('Échec de l\'enregistrement (connexion perdue ?) :', e);
+    state.saveStatus = 'error';
+    render();
+  }
+}
+async function retryPendingSave(){
+  if(!state.pendingSaveBlob || !state.pendingSaveCompanyId) return;
+  try{
+    const { error } = await sb.from('companies').update({ data: state.pendingSaveBlob, updated_at: new Date().toISOString() }).eq('id', state.pendingSaveCompanyId);
+    if(error) throw error;
+    state.pendingSaveBlob = null;
+    state.saveStatus = 'ok';
+    render();
+  }catch(e){
+    console.error('Nouvelle tentative d\'enregistrement échouée :', e);
+  }
+}
+if(typeof window !== 'undefined' && window.addEventListener){
+  window.addEventListener('online', ()=>{ retryPendingSave(); });
+  window.addEventListener('beforeunload', (e)=>{
+    if(state.pendingSaveBlob){ e.preventDefault(); e.returnValue=''; return ''; }
+  });
 }
 function logActivity(description){
   state.activityLog.unshift({
@@ -784,9 +834,28 @@ function logoSVG(size){
 }
 
 function render(){
+  try{ renderInner(); }
+  catch(e){
+    console.error('Erreur de rendu interceptée par le filet de sécurité :', e);
+    root.innerHTML = '';
+    const wrap = el('div',{style:'min-height:100vh;display:flex;align-items:center;justify-content:center;padding:30px;background:var(--paper)'});
+    wrap.appendChild(el('div',{class:'card', style:'max-width:460px'},
+      el('h3',{},'Un problème inattendu est survenu'),
+      el('div',{class:'help', style:'margin-bottom:16px'}, 'Vos données ne sont pas perdues. Essayez de recharger la page ; si le problème persiste, contactez le support en mentionnant ce que vous étiez en train de faire.'),
+      el('div',{class:'btn-row'}, el('button',{class:'btn gold', style:'width:100%', onClick:()=>{ location.reload(); }}, 'Recharger la page'))
+    ));
+    root.appendChild(wrap);
+  }
+}
+function renderInner(){
   root.innerHTML='';
   if(state.loading){ root.appendChild(el('div',{style:'padding:60px;color:#5B6660;font-family:Inter,sans-serif;'}, 'Chargement…')); return; }
-  if(!state.session){ (state.authScreen==='signup' ? renderSignUp : renderSignIn)(root); return; }
+  if(!state.session){
+    if(state.authScreen==='signup') renderSignUp(root);
+    else if(state.authScreen==='forgot') renderForgotPassword(root);
+    else renderSignIn(root);
+    return;
+  }
   if(state.authScreen==='expired'){ renderExpired(root); return; }
   if(!state.profile){ renderActivateLicense(root); return; }
   if(!state.companyId){ renderCompanySelector(root); return; }
@@ -823,6 +892,12 @@ function render(){
   else if(state.tab==='params') renderParams(main);
 
   root.appendChild(nav); root.appendChild(main);
+  if(state.saveStatus==='error'){
+    root.appendChild(el('div',{class:'no-print', style:'position:fixed;bottom:0;left:0;right:0;background:var(--red);color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;z-index:80;box-shadow:0 -4px 14px rgba(0,0,0,.2)'},
+      el('span',{}, '⚠ Connexion perdue — vos dernières modifications n\'ont pas pu être enregistrées. Nouvelle tentative automatique dès le retour de la connexion. Ne fermez pas cette fenêtre.'),
+      el('button',{class:'btn secondary', style:'background:#fff;color:var(--red);flex:none', onClick:retryPendingSave}, 'Réessayer maintenant')
+    ));
+  }
   if(state.modal) root.appendChild(state.modal());
 }
 function authShell(children){
@@ -852,9 +927,29 @@ function renderSignIn(root){
   card.appendChild(el('div',{class:'field', style:'margin-bottom:10px'}, label('E-mail'), eIn));
   card.appendChild(el('div',{class:'field'}, label('Mot de passe'), pIn));
   if(state.authError) card.appendChild(el('div',{style:'color:var(--red);font-size:12.5px;margin-top:10px'}, state.authError));
-  card.appendChild(el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn gold', style:'width:100%', onClick:doLogin}, 'Se connecter')));
-  card.appendChild(el('div',{class:'help', style:'margin-top:14px;text-align:center'},
+  card.appendChild(el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn gold', style:'width:100%', disabled:state.authLoading?'disabled':undefined, onClick:doLogin}, state.authLoading?'Connexion…':'Se connecter')));
+  card.appendChild(el('div',{class:'help', style:'margin-top:12px;text-align:center'},
+    el('a',{href:'#', style:'color:var(--pine);font-weight:600', onClick:(e)=>{e.preventDefault(); state.authScreen='forgot'; state.authError=''; render();}}, 'Mot de passe oublié ?')
+  ));
+  card.appendChild(el('div',{class:'help', style:'margin-top:10px;text-align:center'},
     'Pas encore de compte ? ', el('a',{href:'#', style:'color:var(--pine);font-weight:600', onClick:(e)=>{e.preventDefault(); state.authScreen='signup'; state.authError=''; render();}}, 'Activer une licence')
+  ));
+  root.appendChild(authShell([card]));
+}
+function renderForgotPassword(root){
+  let email='';
+  const card = el('div',{class:'card'}, el('h3',{},'Mot de passe oublié'),
+    el('div',{class:'help', style:'margin-top:-6px;margin-bottom:14px'}, 'Entrez votre adresse e-mail — vous recevrez un lien pour choisir un nouveau mot de passe.')
+  );
+  const eIn = el('input',{type:'email', placeholder:'Adresse e-mail'});
+  eIn.addEventListener('input', e=>email=e.target.value);
+  const doReset = ()=>{ if(!email.trim()){ state.authError='Merci de saisir votre e-mail.'; render(); return; } requestPasswordReset(email.trim()); };
+  eIn.addEventListener('keydown', e=>{ if(e.key==='Enter') doReset(); });
+  card.appendChild(el('div',{class:'field'}, label('E-mail'), eIn));
+  if(state.authError) card.appendChild(el('div',{style:'color:var(--red);font-size:12.5px;margin-top:10px'}, state.authError));
+  card.appendChild(el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn gold', style:'width:100%', disabled:state.authLoading?'disabled':undefined, onClick:doReset}, state.authLoading?'Envoi…':'Envoyer le lien')));
+  card.appendChild(el('div',{class:'help', style:'margin-top:12px;text-align:center'},
+    el('a',{href:'#', style:'color:var(--pine);font-weight:600', onClick:(e)=>{e.preventDefault(); state.authScreen='login'; state.authError=''; render();}}, '← Retour à la connexion')
   ));
   root.appendChild(authShell([card]));
 }
@@ -870,10 +965,12 @@ function renderSignUp(root){
   card.appendChild(el('div',{class:'field', style:'margin-bottom:10px'}, label('Nom de l\'entreprise (exactement comme transmis par votre fournisseur)'), f('Raison sociale','text',v=>companyName=v)));
   card.appendChild(el('div',{class:'field'}, label('Clé de licence'), f('SUNU-XXXX-XXXX-XXXX-XXXX','text',v=>licenseKey=v)));
   if(state.authError) card.appendChild(el('div',{style:'color:var(--red);font-size:12.5px;margin-top:10px'}, state.authError));
-  card.appendChild(el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn gold', style:'width:100%', onClick:()=>{
+  card.appendChild(el('div',{class:'btn-row', style:'margin-top:16px'}, el('button',{class:'btn gold', style:'width:100%', disabled:state.authLoading?'disabled':undefined, onClick:()=>{
     if(!nom||!prenom||!email||!password||!companyName||!licenseKey){ state.authError='Tous les champs sont obligatoires.'; render(); return; }
+    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ state.authError='Adresse e-mail invalide.'; render(); return; }
+    if(password.length < 6){ state.authError='Le mot de passe doit contenir au moins 6 caractères.'; render(); return; }
     signUp(email, password, nom, prenom, companyName, licenseKey.trim());
-  }}, 'Créer mon compte')));
+  }}, state.authLoading?'Création…':'Créer mon compte')));
   card.appendChild(el('div',{class:'help', style:'margin-top:14px;text-align:center'},
     'Déjà un compte ? ', el('a',{href:'#', style:'color:var(--pine);font-weight:600', onClick:(e)=>{e.preventDefault(); state.authScreen='login'; state.authError=''; render();}}, 'Se connecter')
   ));
@@ -2919,6 +3016,34 @@ function renderParams(main){
     if(state.activityLog.length>50) logCard.appendChild(el('div',{class:'help', style:'margin-top:10px'}, '+ '+(state.activityLog.length-50)+' action(s) plus ancienne(s) non affichée(s).'));
   }
   main.appendChild(logCard);
+
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'Mon compte'),
+    el('div',{class:'help', style:'margin-top:-6px;margin-bottom:14px'}, 'Connecté en tant que '+(state.profile.email||'')+'.'),
+    (()=>{
+      let p1='', p2='';
+      const i1 = el('input',{type:'password', placeholder:'Nouveau mot de passe (6 caractères min.)'});
+      i1.addEventListener('input', e=>p1=e.target.value);
+      const i2 = el('input',{type:'password', placeholder:'Confirmer'});
+      i2.addEventListener('input', e=>p2=e.target.value);
+      const msg = el('div',{});
+      const btn = el('button',{class:'btn gold', onClick: async ()=>{
+        msg.innerHTML=''; msg.appendChild(el('div',{}));
+        if(p1.length<6){ msg.textContent='Le mot de passe doit contenir au moins 6 caractères.'; msg.style.color='var(--red)'; return; }
+        if(p1!==p2){ msg.textContent='Les deux mots de passe ne correspondent pas.'; msg.style.color='var(--red)'; return; }
+        btn.disabled = true; btn.textContent='Mise à jour…';
+        const result = await changeMyPassword(p1);
+        btn.disabled = false; btn.textContent='Changer le mot de passe';
+        if(!result.success){ msg.textContent='Erreur : '+result.message; msg.style.color='var(--red)'; return; }
+        msg.textContent='Mot de passe mis à jour.'; msg.style.color='var(--pine)';
+        i1.value=''; i2.value=''; p1=''; p2='';
+      }}, 'Changer le mot de passe');
+      return el('div',{},
+        el('div',{class:'grid grid-2', style:'max-width:420px;margin-bottom:10px'}, el('div',{class:'field'}, label('Nouveau mot de passe'), i1), el('div',{class:'field'}, label('Confirmer'), i2)),
+        el('div',{class:'btn-row'}, btn),
+        el('div',{style:'margin-top:8px;font-size:12.5px'}, msg)
+      );
+    })()
+  ));
 
   if(state.profile.is_admin){
     main.appendChild(el('div',{class:'card'}, el('h3',{},'Utilisateurs et droits d\'accès'),
