@@ -571,6 +571,9 @@ async function initAuth(){
 const LICENSE_SECRET = 'SUNUPAIE-K9#2026'; // doit être identique à celle du générateur Sunu Paie Keygen
 function normLicense(n){ return String(n||'').toUpperCase().normalize('NFD').replace(/[^A-Z0-9]/g,''); }
 async function sha256(s){
+  if(!window.crypto || !window.crypto.subtle){
+    throw new Error('Votre navigateur bloque les fonctions de sécurité nécessaires sur cette page (souvent car elle n\'est pas chargée en HTTPS). Ouvrez Sunu Paie via son adresse officielle en https://, pas depuis un fichier local.');
+  }
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
   return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('').toUpperCase();
 }
@@ -589,50 +592,94 @@ async function verifyLicenseKey(companyName, key){
   return { valid:true, edition, expiresAt: expDate.toISOString() };
 }
 async function loadProfileAndCompanies(){
-  const { data: profile, error } = await sb.from('profiles').select('*').eq('id', state.session.user.id).single();
-  if(error || !profile){
-    // Compte créé mais licence jamais activée (ex: reprise après vérification email)
-    state.profile = null; state.companies = []; state.authScreen = 'activate'; state.authError='';
-    return;
-  }
-  if(profile.expires_at && new Date(profile.expires_at) < new Date()){
-    const d = new Date(profile.expires_at);
+  console.log('[Sunu Paie] loadProfileAndCompanies() — début, user id =', state.session?.user?.id);
+  try{
+    const { data: profile, error } = await sb.from('profiles').select('*').eq('id', state.session.user.id).single();
+    if(error || !profile){
+      console.log('[Sunu Paie] Aucun profil trouvé pour ce compte (licence pas encore activée) :', error?.message||'(pas de ligne)');
+      state.profile = null; state.companies = []; state.authScreen = 'activate'; state.authError='';
+      return;
+    }
+    console.log('[Sunu Paie] Profil chargé :', { email:profile.email, is_admin:profile.is_admin, license_key:profile.license_key, expires_at:profile.expires_at, is_active:profile.is_active });
+    if(profile.expires_at && new Date(profile.expires_at) < new Date()){
+      const d = new Date(profile.expires_at);
+      console.warn('[Sunu Paie] Licence expirée le', d.toISOString());
+      state.profile = null; state.companies = [];
+      state.authError = 'Votre licence a expiré le '+d.toLocaleDateString('fr-FR')+'. Contactez votre fournisseur pour la renouveler.';
+      state.authScreen = 'expired';
+      return;
+    }
+    if(profile.is_active === false){
+      console.warn('[Sunu Paie] Compte désactivé (is_active=false)');
+      state.profile = null; state.companies = [];
+      state.authError = 'Votre accès a été désactivé. Contactez votre administrateur.';
+      state.authScreen = 'expired';
+      return;
+    }
+    state.profile = profile;
+    const { data: companies, error: companiesError } = await sb.from('companies').select('id,nom').order('nom');
+    if(companiesError) console.error('[Sunu Paie] Erreur lors du chargement des entreprises :', companiesError.message);
+    state.companies = (companies||[]).map(c=>({id:c.id, nom:c.nom}));
+    console.log('[Sunu Paie] Entreprises visibles :', state.companies.length);
+    state.authScreen = null; state.authError = '';
+  }catch(e){
+    console.error('[Sunu Paie] Exception inattendue dans loadProfileAndCompanies() :', e);
     state.profile = null; state.companies = [];
-    state.authError = 'Votre licence a expiré le '+d.toLocaleDateString('fr-FR')+'. Contactez votre fournisseur pour la renouveler.';
-    state.authScreen = 'expired';
-    return;
+    state.authError = 'Erreur inattendue lors du chargement de votre compte : '+(e?.message||e)+'. Vérifiez votre connexion et réessayez.';
+    state.authScreen = 'login';
+    state.session = null; // on repart de la connexion pour eviter un etat bloque incoherent
   }
-  if(profile.is_active === false){
-    state.profile = null; state.companies = [];
-    state.authError = 'Votre accès a été désactivé. Contactez votre administrateur.';
-    state.authScreen = 'expired';
-    return;
-  }
-  state.profile = profile;
-  const { data: companies } = await sb.from('companies').select('id,nom').order('nom');
-  state.companies = (companies||[]).map(c=>({id:c.id, nom:c.nom}));
-  state.authScreen = null; state.authError = '';
 }
 async function signUp(email, password, nom, prenom, companyName, licenseKey){
+  console.log('[Sunu Paie] signUp() — début', { email, companyName, licenseKey });
   state.authError = '';
-  const check = await verifyLicenseKey(companyName, licenseKey);
-  if(!check.valid){ state.authError = check.message; render(); return; }
-  state.authLoading = true; render();
-  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; state.authLoading=false; render(); return; }
-  if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  const { data, error } = await sb.auth.signUp({ email, password });
-  if(error){ state.authError = error.message; state.authLoading=false; render(); return; }
-  if(!data.session){
-    state.authError = 'Compte créé. Si une confirmation par e-mail est requise, vérifiez votre boîte de réception puis reconnectez-vous.';
-    state.authScreen = 'login'; state.authLoading=false;
-    render(); return;
+  state.authLoading = true; render(); // affiche immédiatement le chargement, avant toute vérification
+  try{
+    console.log('[Sunu Paie] Étape 1/5 — vérification de la clé de licence…');
+    const check = await verifyLicenseKey(companyName, licenseKey);
+    if(!check.valid){
+      console.warn('[Sunu Paie] Clé de licence refusée :', check.message);
+      state.authError = check.message; state.authLoading=false; render(); return;
+    }
+    console.log('[Sunu Paie] Clé de licence valide :', check);
+
+    console.log('[Sunu Paie] Étape 2/5 — chargement de la librairie Supabase…');
+    await ensureSupabaseLib();
+    if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    console.log('[Sunu Paie] Étape 3/5 — création du compte Supabase Auth…');
+    const { data, error } = await sb.auth.signUp({ email, password });
+    if(error){
+      console.error('[Sunu Paie] Échec de la création du compte :', error.message, error);
+      state.authError = 'Impossible de créer le compte : '+error.message; state.authLoading=false; render(); return;
+    }
+    console.log('[Sunu Paie] Compte Supabase créé, session présente :', !!data.session);
+    if(!data.session){
+      state.authError = 'Compte créé. Si une confirmation par e-mail est requise, vérifiez votre boîte de réception puis reconnectez-vous.';
+      state.authScreen = 'login'; state.authLoading=false;
+      render(); return;
+    }
+    state.session = data.session;
+
+    console.log('[Sunu Paie] Étape 4/5 — activation de la licence sur ce compte…');
+    const result = await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
+    if(!result.success){
+      console.error('[Sunu Paie] Échec de l\'activation de la licence :', result.message);
+      state.authError = result.message; state.authLoading=false; render(); return;
+    }
+    console.log('[Sunu Paie] Licence activée avec succès :', result);
+
+    console.log('[Sunu Paie] Étape 5/5 — chargement du profil et des entreprises…');
+    await loadProfileAndCompanies();
+    state.authLoading = false;
+    console.log('[Sunu Paie] signUp() — terminé. Profil actif :', !!state.profile);
+    render();
+  }catch(e){
+    console.error('[Sunu Paie] Exception inattendue dans signUp() :', e);
+    state.authLoading = false;
+    state.authError = 'Une erreur inattendue est survenue : '+(e?.message||e)+'. Si le problème persiste, contactez le support.';
+    render();
   }
-  state.session = data.session;
-  const result = await finalizeActivation(licenseKey.trim().toUpperCase(), companyName.trim(), nom, prenom, check);
-  if(!result.success){ state.authError = result.message; state.authLoading=false; render(); return; }
-  await loadProfileAndCompanies();
-  state.authLoading = false;
-  render();
 }
 async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
   try{
@@ -661,15 +708,33 @@ async function finalizeActivation(licenseKey, companyName, nom, prenom, check){
   }
 }
 async function signIn(email, password){
+  console.log('[Sunu Paie] signIn() — début', { email });
   state.authError = ''; state.authLoading = true; render();
-  try{ await ensureSupabaseLib(); }catch(e){ state.authError = e.message; state.authLoading=false; render(); return; }
-  if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  const { data, error } = await sb.auth.signInWithPassword({ email, password });
-  if(error){ state.authError = 'Identifiant ou mot de passe incorrect.'; state.authLoading=false; render(); return; }
-  state.session = data.session;
-  await loadProfileAndCompanies();
-  state.authLoading = false;
-  render();
+  try{
+    console.log('[Sunu Paie] Étape 1/3 — chargement de la librairie Supabase…');
+    await ensureSupabaseLib();
+    if(!sb) sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    console.log('[Sunu Paie] Étape 2/3 — vérification des identifiants…');
+    const { data, error } = await sb.auth.signInWithPassword({ email, password });
+    if(error){
+      console.error('[Sunu Paie] Échec de connexion :', error.message, error);
+      state.authError = 'Identifiant ou mot de passe incorrect.'; state.authLoading=false; render(); return;
+    }
+    console.log('[Sunu Paie] Connexion Supabase réussie, user id =', data.session?.user?.id);
+    state.session = data.session;
+
+    console.log('[Sunu Paie] Étape 3/3 — chargement du profil et des entreprises…');
+    await loadProfileAndCompanies();
+    state.authLoading = false;
+    console.log('[Sunu Paie] signIn() — terminé. Profil actif :', !!state.profile);
+    render();
+  }catch(e){
+    console.error('[Sunu Paie] Exception inattendue dans signIn() :', e);
+    state.authLoading = false;
+    state.authError = 'Une erreur inattendue est survenue : '+(e?.message||e)+'. Vérifiez votre connexion et réessayez.';
+    render();
+  }
 }
 async function requestPasswordReset(email){
   state.authError = ''; state.authLoading = true; render();
