@@ -908,6 +908,7 @@ const root = document.getElementById('paie-root');
 function el(tag, attrs, ...children){
   const e = document.createElement(tag);
   if(attrs) for(const k in attrs){
+    if(attrs[k]===undefined || attrs[k]===null) continue;
     if(k==='class') e.className=attrs[k];
     else if(k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
     else if(k==='html') e.innerHTML = attrs[k];
