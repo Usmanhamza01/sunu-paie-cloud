@@ -616,6 +616,17 @@ async function loadProfileAndCompanies(){
       state.authScreen = 'expired';
       return;
     }
+    try{
+      const { data: revoked, error: revokedError } = await sb.rpc('is_license_revoked', { p_license_key: profile.license_key });
+      if(revokedError) console.warn('[Sunu Paie] Vérification de blocage impossible (ignorée) :', revokedError.message);
+      else if(revoked === true){
+        console.warn('[Sunu Paie] Licence bloquée par le fournisseur (registre)');
+        state.profile = null; state.companies = [];
+        state.authError = 'Cette licence a été bloquée par votre fournisseur. Contactez-le pour la réactiver.';
+        state.authScreen = 'expired';
+        return;
+      }
+    }catch(e){ console.warn('[Sunu Paie] Vérification de blocage échouée (ignorée, connexion instable ?) :', e); }
     state.profile = profile;
     const { data: companies, error: companiesError } = await sb.from('companies').select('id,nom').order('nom');
     if(companiesError) console.error('[Sunu Paie] Erreur lors du chargement des entreprises :', companiesError.message);
@@ -908,7 +919,6 @@ const root = document.getElementById('paie-root');
 function el(tag, attrs, ...children){
   const e = document.createElement(tag);
   if(attrs) for(const k in attrs){
-    if(attrs[k]===undefined || attrs[k]===null) continue;
     if(k==='class') e.className=attrs[k];
     else if(k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
     else if(k==='html') e.innerHTML = attrs[k];
@@ -1110,7 +1120,13 @@ function renderCompanySelector(root){
       el('div',{style:'display:flex;align-items:center;gap:9px;margin-bottom:6px'}, el('span',{html:logoSVG(30)}), el('h1',{style:'font-size:22px'}, APP_NAME)),
       el('div',{class:'subtitle'}, 'Connecté : '+(state.profile.email||'')+(state.profile.is_admin?' (admin)':''))
     ),
-    el('button',{class:'btn secondary', onClick:signOutUser}, 'Déconnexion')
+    el('div',{class:'btn-row', style:'margin:0'},
+      el('button',{class:'btn secondary', disabled:state.refreshing?'disabled':undefined, onClick: async ()=>{
+        state.refreshing = true; render();
+        try{ await loadProfileAndCompanies(); } finally { state.refreshing = false; render(); }
+      }}, state.refreshing?'Actualisation…':'↻ Actualiser'),
+      el('button',{class:'btn secondary', onClick:signOutUser}, 'Déconnexion')
+    )
   ));
   const card = el('div',{class:'card'}, el('h3',{},'Choisir une entreprise'));
   if(!state.companies.length){
@@ -1637,6 +1653,90 @@ function buildDNSRows(moisIdx, annee){
     ];
   });
 }
+/* ====================================================================
+   ÉTAT 1024 — déclaration fiscale annuelle (DGID)
+   Reproduit exactement la structure des deux modèles officiels fournis :
+   feuille "Etat_recapitulatif_dss_salaires" (12 mois + ajustement, les
+   colonnes Date de versement / Numéro de quittance / Observations sont
+   à compléter manuellement, comme dans le modèle d'origine) et feuille
+   "Etat_annuel_des_salaires" (une ligne par salarié, remplie au maximum
+   depuis les données déjà saisies dans l'application).
+   ==================================================================== */
+function mapTypePieceEtat1024(code){
+  if(code==='NIN') return 'CARTE NATIONALE D\'IDENTITE';
+  if(code==='PASS') return 'PASSEPORT ETRANGER';
+  return ''; // CDAO/CONC/IDF : pas d'équivalent certain dans ce modèle -> laissé à compléter
+}
+function mapSituationMatEtat1024(situationFamiliale){
+  if(situationFamiliale==='Célibataire') return 'C';
+  if(situationFamiliale==='Marié' || situationFamiliale==='Mariée') return 'M';
+  if(situationFamiliale==='Divorcé(e)') return 'D';
+  if(situationFamiliale==='Veuf/Veuve') return 'V';
+  return '';
+}
+function mapCiviliteEtat1024(sexe, situationFamiliale){
+  if(sexe==='H') return 'M.';
+  if(sexe==='F') return situationFamiliale==='Célibataire' ? 'MLLE' : 'MME';
+  return '';
+}
+async function exportEtat1024Recapitulatif(annee){
+  try{ await ensureXLSXLib(); } catch(e){ alert(e.message); return; }
+  const totauxMois = [];
+  for(let m=0;m<12;m++){
+    let ir=0, trimf=0, cfce=0;
+    state.salaries.forEach(s=>{
+      const b = calcBulletin(s, getSaisie(s.id,m), computeArrondiPrecedent(s,m), state.params, m, annee);
+      ir += b.retenues.ir; trimf += b.retenues.trimf; cfce += b.patronales.cfce;
+    });
+    totauxMois.push({ir,trimf,cfce});
+  }
+  const rows = [
+    ['Salaire_du_mois','Date_versement','Montant_global_versement','Retenue_IR','Retenue_TRIMF','Retenue_CFCE','Numero_quittance','Observations'],
+    ...MOIS_LABEL.map((lbl,i)=>[lbl.toUpperCase(), '', {t:'n', f:`D${i+2}+E${i+2}+F${i+2}`}, Math.round(totauxMois[i].ir), Math.round(totauxMois[i].trimf), Math.round(totauxMois[i].cfce), '', '']),
+    ['AJUSTEMENT','','','','','','','']
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:16},{wch:15},{wch:25},{wch:14},{wch:15},{wch:14},{wch:17},{wch:20}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Etat_recapitulatif_dss_salaires');
+  XLSX.writeFile(wb, 'Etat_1024_Recapitulatif_'+annee+'.xlsx');
+  alert('Généré. Les colonnes « Date de versement », « Numéro de quittance » et « Observations » restent à compléter manuellement (comme sur le modèle officiel) — le reste est déjà calculé.');
+}
+async function exportEtat1024Detail(annee){
+  try{ await ensureXLSXLib(); } catch(e){ alert(e.message); return; }
+  const rows = [
+    ['Matricule_employe','Type_Piece_employe','Numero_Piece_employe','Civilite_employe','Prenom_employe','Nom_employe','Adresse_employe','Sexe_employe','Nationalite_employe','Situation_mat_employe','Nbrenfantacharge_employe','Nbrepouse_employe','Nbredepart_employe','Periodetravail_employe','Salaireannuel_employe','Avantagenature_employe','Totalbrut_employe','IRbareme_employe','TRIMFbareme_employe','CFCE_employe','Indemnite_employe']
+  ];
+  state.salaries.forEach(s=>{
+    const annuel = anneeDeCalcul(s);
+    let totalBrut=0, ir=0, trimf=0, cfce=0, avantageNature=0, indemnite=0, partsIR=0;
+    for(let m=0;m<12;m++){
+      const b = annuel[m];
+      totalBrut += b.brut; ir += b.retenues.ir; trimf += b.retenues.trimf; cfce += b.patronales.cfce;
+      avantageNature += (b.gains.logement||0) + (b.gains.nourriture||0);
+      indemnite += (b.indemnites?.primeTransport||0) + (b.indemnites?.autres||0);
+      partsIR = b.partsQuotient; // identique chaque mois sauf changement de situation en cours d'année ; on retient la dernière valeur connue
+    }
+    const salaireAnnuel = totalBrut - avantageNature;
+    const debut = GTAEngine.parseFR(s.dateEntree);
+    const fin = s.dateSortie ? GTAEngine.parseFR(s.dateSortie) : null;
+    const periode = (s.dateEntree||'01/01/'+annee) + ' - ' + (s.dateSortie || '31/12/'+annee);
+    rows.push([
+      s.matricule||'', mapTypePieceEtat1024(s.typePieceIdentite), s.numeroPiece||'',
+      mapCiviliteEtat1024(s.sexe, s.situationFamiliale), s.prenom, s.nom, s.adresse||'',
+      s.sexe||'', s.nationalite||'', mapSituationMatEtat1024(s.situationFamiliale),
+      s.nbEnfants||0, s.nbrEpouses||0, partsIR, periode,
+      Math.round(salaireAnnuel), Math.round(avantageNature), Math.round(totalBrut),
+      Math.round(ir), Math.round(trimf), Math.round(cfce), Math.round(indemnite)
+    ]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = rows[0].map(()=>({wch:18}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Etat_annuel_des_salaires');
+  XLSX.writeFile(wb, 'Etat_1024_Detail_'+annee+'.xlsx');
+  alert('Généré. Vérifiez le type de pièce pour les salariés utilisant une carte CEDEAO/consulaire, non prévue dans le modèle officiel (laissée vide dans ce cas).');
+}
 async function exportDNS(moisIndexes, annee){
   try{ await ensureXLSXLib(); } catch(e){ alert(e.message); return; }
   const ent = state.entreprise;
@@ -2076,7 +2176,7 @@ function deleteSalarie(id){
   render();
 }
 function openSalarieModal(existing){
-  const s = existing ? Object.assign({},existing) : { id:uid(), nom:'', prenom:'', dateNaissance:'', lieuNaissance:'', dateEntree:'', dateSortie:'', categorie:'', situationFamiliale:'Célibataire', qualification:'', sexe:'F', nationalite:'S', nbEnfants:0, ipresRC:'NON', congesAcquis:0, typeContrat:'CDI', finPeriodeEssai:'', congesPris:[], numeroAssureSocial:'', typePieceIdentite:'NIN', numeroPiece:'', cadre:'NON', gtaSoldeInitial:0 };
+  const s = existing ? Object.assign({},existing) : { id:uid(), nom:'', prenom:'', dateNaissance:'', lieuNaissance:'', dateEntree:'', dateSortie:'', categorie:'', situationFamiliale:'Célibataire', qualification:'', sexe:'F', nationalite:'S', nbEnfants:0, ipresRC:'NON', congesAcquis:0, typeContrat:'CDI', finPeriodeEssai:'', congesPris:[], numeroAssureSocial:'', typePieceIdentite:'NIN', numeroPiece:'', cadre:'NON', gtaSoldeInitial:0, matricule:'', adresse:'', nbrEpouses:0 };
   if(!s.congesPris) s.congesPris = [];
   state.modal = () => {
     const f = (key,lbl,type='text',opts=null)=>{
@@ -2104,6 +2204,7 @@ function openSalarieModal(existing){
       el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('dateEntree','Date d\'entrée (jj/mm/aaaa)'), f('dateSortie','Date de sortie'), f('nationalite','Nationalité',null,['S','E'])),
       el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('typeContrat','Type de contrat',null,['CDI','CDD','Stage','Essai']), f('finPeriodeEssai','Fin de période d\'essai (jj/mm/aaaa)'), f('cadre','Statut cadre',null,['NON','OUI'])),
       el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('numeroAssureSocial','N° Assuré Social IPRES (10 chiffres)'), f('typePieceIdentite','Type de pièce d\'identité',null,['NIN','CDAO','PASS','CONC','IDF']), f('numeroPiece','N° de la pièce d\'identité')),
+      el('div',{class:'grid grid-3', style:'margin-top:10px'}, f('matricule','Matricule'), f('adresse','Adresse'), f('nbrEpouses','Nombre d\'épouses','number')),
       el('div',{class:'grid grid-2', style:'margin-top:10px'}, f('qualification','Qualification / poste'), f('categorie','Catégorie (convention collective)')),
       el('div',{class:'grid grid-2', style:'margin-top:10px'}, f('situationFamiliale','Situation familiale',null,['Célibataire','Marié','Mariée','Divorcé(e)','Veuf/Veuve']), f('congesAcquis','Solde congés payés acquis (F CFA)','number')),
       el('div',{style:'max-width:260px;margin-top:10px'}, f('gtaSoldeInitial','Solde de congés initial (en jours, module Congés & absences)','number')),
@@ -2905,6 +3006,15 @@ function renderRecap(main){
       const btn = el('button',{class:'btn gold', onClick:()=>{ exportDNS([parseInt(sel.value)], state.entreprise.annee); }}, '⇩ Générer la DNS du mois (.xlsx)');
       return el('div',{class:'select-row', style:'margin-bottom:0'}, el('div',{class:'field', style:'flex:1;max-width:220px'}, label('Mois'), sel), btn);
     })()
+  ));
+
+  // --- État 1024 (déclaration fiscale annuelle) ---
+  main.appendChild(el('div',{class:'card'}, el('h3',{},'État 1024 — déclaration fiscale annuelle (DGID)'),
+    el('div',{class:'help', style:'margin-top:-8px;margin-bottom:12px'}, 'Reproduit exactement les deux modèles officiels : le récapitulatif mensuel des retenues, et le détail annuel par salarié. Certaines cellules (marquées dans le modèle d\'origine) restent à compléter manuellement après export.'),
+    el('div',{class:'btn-row'},
+      el('button',{class:'btn gold', onClick:()=>{ exportEtat1024Recapitulatif(state.entreprise.annee); }}, '⇩ État récapitulatif (.xlsx)'),
+      el('button',{class:'btn gold', onClick:()=>{ exportEtat1024Detail(state.entreprise.annee); }}, '⇩ État détail par salarié (.xlsx)')
+    )
   ));
 
   // --- Livre de paie ---
